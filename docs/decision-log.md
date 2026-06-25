@@ -132,7 +132,7 @@ subpath-export half in-repo; the optional-peer half is the addition.
 (callbacks + promises, no framework type or reactivity primitive in any core signature);
 framework integration is exclusively additive. The **write/emit ergonomics remain open** under
 G2 — discovered in design and implementation, not pinned now. Reusable analysis: design note
-`ns-design-framework-composition.md`.
+`docs/design/framework-composition.md`.
 
 ### 2026-06-24 — BCon working rule adopted [LOCKED]
 Adopted **BCon** ("Be concise" + no BS / no fluff / no sycophancy / only-valid / no-hallucinations

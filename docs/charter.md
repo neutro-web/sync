@@ -224,7 +224,7 @@ thin adapters** — both forced by the standalone axiom, `value:unknown`, and th
 - **Adapters are subpath exports** — `@neutro/sync/adapters/react`, `/adapters/svelte`, … on
   the single package; optional peer deps, independently tree-shakeable. (Charter §11, decision log.)
 - **Still open under G2:** the `emit`/local-write ergonomics — discovered in design and
-  implementation, not pinned now. Reusable analysis: design note `ns-design-framework-composition.md`.
+  implementation, not pinned now. Reusable analysis: design note `docs/design/framework-composition.md`.
 
 ---
 

@@ -1,4 +1,4 @@
-# @neutro/sync (ns) — Frozen Seam Spec
+# @neutro/sync (ns) — Seam Contract
 
 > The contract surface of **`@neutro/sync` (`ns`)**, a universal sync layer: the minimal set of types a consumer (a reactive database, a shared-state library, a reactive view engine, a reactive form library, queues, rich-text, presence, …) configures against. Derived from the T1–T5 decisions of the design session. Nothing here is domain-specific. CRDT internals, concrete transports, peer/mesh logic, and persistence engines are **out of scope** and deferred to the dedicated `ns` implementation session.
 >
@@ -419,4 +419,4 @@ This is **not an `ns` type** — the engine never sees this state — but the co
 
 ---
 
-> **Consumer handoff.** Resolving a specific consumer's local sync questions against this frozen surface is consumer-specific work, kept out of this spec. See the consumer's own return-path document (e.g. *ndb — Sync Return Path*) for how a given library drops §1–§8 into its sync seam, resolves its local equivalents, and re-runs its reviewer checklist against the concrete contract.
+> **Consumer handoff.** Resolving a specific consumer's local sync questions against this frozen surface is consumer-specific work, kept out of this spec. A consumer drops §1–§8 into its own sync seam, resolves its local equivalents, and re-runs its own reviewer checklist against the concrete contract.
