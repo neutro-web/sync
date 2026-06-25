@@ -1,0 +1,143 @@
+# ns — Decision Log
+
+> **How to read this file.** Two surfaces:
+> 1. **Current State** (below) — the *resolved* picture: what is locked, open, or superseded
+>    **right now**. This is the only section that gets *edited*. Read this first.
+> 2. **Log** (further down) — an **append-only, date-timed** history of decisions and their
+>    rationale. Never edit or delete entries; only append. Read oldest→newest to reconstruct
+>    *how* and *why* a decision was reached.
+>
+> **How to write to this file.** When a session reaches a decision (locks something, opens a
+> question, supersedes a prior call, or resolves a research finding), append a new dated entry
+> to the Log **and** update the Current State header to match. Never rewrite history; record
+> reversals as new entries that explicitly supersede the old one (cite its date). If a decision
+> changes the seam contract, note the contract version bump in the entry.
+>
+> **Maintenance.** When the Log grows unwieldy, move superseded/stale entries to
+> `decision-log-archive.md` with a one-line pointer left behind — do not delete, because a
+> superseded decision's rationale is often what prevents re-making the mistake.
+>
+> **Authority.** The **ns Seam Contract** is the source of truth for sync-seam *semantics*.
+> This log records decisions, including ones that change the contract. If this log and the
+> contract conflict, the conflict must be flagged, not silently resolved.
+
+---
+
+## Current State
+
+_Last updated: 2026-06-24. Seam Contract **v1.0** (frozen)._
+
+### Status at a glance
+- **Seam contract:** FROZEN at v1.0. T1–T5 ratified; eight seam types defined; §9 consumer map
+  and §9.1 local-derived-state rule in place. This is the founding semantics.
+- **Governance scaffold:** Bootstrap in progress. Charter, custom instructions, AGENTS.md
+  authored. decision-log + implementation-state seeded (this file + its sibling).
+- **Code:** None yet. No `src/`. Phase 1 (reference engine) not started.
+
+### Locked (do not drift without an explicit superseding entry)
+- **Standalone** — `ns` has no dependency on any neutro sibling (including `nv`). Like every
+  neutro package, it stands alone; `nv` and other consumers may use it, but `ns` never depends
+  on them. No `neutro/*` runtime import ever enters `src/core`.
+- **T1** — one discriminated `Change` type; `kind` encodes (idempotent, replay, ordering);
+  heterogeneous batches; no feed-splitting.
+- **T2** — `Cursor` (ns-owned, concrete) vs. `Version` (strategy-owned, opaque); ns's only
+  versioning act is `ClockStrategy.compare()`.
+- **T3** — `Lifetime` gates persistence + replay; ephemeral never advances the cursor / never
+  persisted / never replayed.
+- **T4** — detect-not-decide; `Conflict` payload is value-opaque; four-valued `Resolution`;
+  `defer` (open conflict) tolerated by contract.
+- **T5** — per-scope causal order; cross-scope total order is an anti-promise.
+- **§7** — delivery guarantees live above the transport; `send` resolves on hand-off, not ack.
+- **OpChange.version** — optional; present only for op-transport-with-local-fold consumers.
+- **Framework adapters = subpath exports** — `@neutro/sync/adapters/react`, `/adapters/svelte`,
+  etc., on the single package (not separate packages). Framework peers are `optional` peer deps;
+  each adapter subpath is independently tree-shakeable. The core API is plain TS (callbacks +
+  promises, no framework type); adapters are additive over the `subscribe`/`snapshot`/`emit`
+  binding seam. (Write/emit ergonomics remain part of G2 — see design note.)
+- **Project structure** — single published package, subpath exports, mirrors nv (see Charter §11).
+
+### Open gates (surfaced, NOT decided — do not build past)
+- **G2 — Public API surface**: consumer-facing client/builder ergonomics atop the frozen seam.
+  Blocks Phase 4. Sketches allowed as design docs; no frozen API.
+- **G3 — LCD-risk proof**: demonstrate the universal seam isn't worse than a purpose-built
+  engine per consumer. Addressed by the conformance suite; not blocking early phases.
+
+### Superseded / resolved
+- **G1 — Substrate** — RESOLVED 2026-06-24: `ns` is standalone (option a). Was opened earlier
+  the same day; closed once confirmed `ns` follows the neutro standalone pattern. See Log.
+
+---
+
+## Log
+
+### 2026-06-24 — Seam contract frozen at v1.0 [LOCKED]
+The founding design session ratified T1–T5 and froze the eight-type seam surface (`Change`,
+`Cursor`/`Version`, `Lifetime`, `Feed`, `Conflict`/`Resolver`, `Scope`, `Transport`, opaque
+tokens). Verified for fit against three consumer shapes during design: a reactive database
+(op-transport-with-local-fold, drove the `OpChange.version` addition), a reactive form library
+(three-way state/ephemeral/op split in one scope; surfaced the local-derived-state third
+category, §9.1), and a reactive view engine (fit through its external-source seam; drove the
+`Snapshot`-serves-memoryless-transport widening). Rationale and full surface: the Seam Contract.
+This is the authoritative semantics; all later work configures against it.
+
+### 2026-06-24 — Project bootstrap; governance scaffold established
+Stood up `ns` as a multi-session claude.ai project mirroring the neutro house pattern (most
+closely `nv`). Authored the Founding Charter (what ns is/isn't, axioms, roadmap, session model,
+structure comparison), the project custom instructions, and `AGENTS.md`. Seeded this decision
+log and the implementation-state map. No code yet.
+
+### 2026-06-24 — Substrate gate opened then RESOLVED: ns is standalone [LOCKED — G1 closed]
+Briefly opened the question of whether the ns core is (a) standalone, (b) built on nv, or (c)
+nv-aware-but-independent, because the seam contract is consumer/transport-agnostic and did not
+itself decide. **Resolved the same day:** `ns` is **standalone** (option a) — it follows the
+neutro family pattern where every package stands alone. `ns` has no dependency on nv or any
+sibling; nv and other consumers *may* use `ns`, but `ns` never depends on them. Consequence:
+no `neutro/*` runtime import in `src/core`; there is no adapter package in core scope (a
+reactive consumer binds to ns through ns's own public surface, on the consumer's side). This
+unblocks repo shape and workstreams — both now final, not provisional.
+
+### 2026-06-24 — Public API gate opened [OPEN — G2]
+The frozen seam is the *internal* contract between engine/strategies/transports/consumers. The
+*consumer-facing* convenience API (client instantiation, scope registration, transport+resolver
+attachment, subscription ergonomics) is deliberately left unspecified to avoid baking a public
+shape prematurely (mirrors nv's open component-API gate). Sketches welcome as design docs; no
+frozen `createSync(...)`.
+
+### 2026-06-24 — Competitive landscape verified (June 2026)
+Confirmed the 2026 framing is "which sync-engine boundary?" not "CRDT or OT?", and that the
+recurring practical lesson is that CRDTs solve convergence but not collaboration and most
+offline-first apps need only queued-writes-that-sync. Positions ns as the universal *seam* into
+which a CRDT is one pluggable resolver — not a CRDT competitor. Named the honest risk (LCD-risk,
+G3): a thin universal seam must prove it isn't worse than a purpose-built engine per consumer.
+Sources: CRDT-library and offline-first-stack surveys, verified not asserted from memory.
+
+### 2026-06-24 — Framework composition model; adapter packaging = subpath exports [LOCKED]
+Confirmed ns composes on (a) vanilla JS/TS as the *primary* surface and (b) every frontend
+framework via thin adapters — both forced by the standalone axiom + `value:unknown` + the
+"subscription delivers changes" seam, not aspirational. The framework-binding seam is three
+core primitives — `subscribe(scope, handlers)`, `snapshot(scope)`, `emit`/local-write —
+mapped onto each framework's native reactivity primitive (React `useSyncExternalStore`, Svelte
+store contract, Vue `shallowRef`, Solid/signals `{subscribe}`, Angular Observable/signal). An
+adapter that needs to understand a `Change` or touch a `Cursor` indicates the core API is wrong.
+
+**Packaging DECIDED:** framework adapters are **subpath exports** of the single `@neutro/sync`
+package (`@neutro/sync/adapters/react`, `/adapters/svelte`, …), not separate packages — one
+version, one release, one install. Requirements this imposes on the build (gate items, not
+free): framework peers declared as **optional peer dependencies** (`peerDependenciesMeta`), and
+each adapter subpath **independently tree-shakeable** so importing `/adapters/react` pulls no
+other adapter's code and requires no other framework installed. nv already proves the
+subpath-export half in-repo; the optional-peer half is the addition.
+
+**Pre-committed constraint on G2 (Public API):** the core consumer-facing API is plain TS
+(callbacks + promises, no framework type or reactivity primitive in any core signature);
+framework integration is exclusively additive. The **write/emit ergonomics remain open** under
+G2 — discovered in design and implementation, not pinned now. Reusable analysis: design note
+`ns-design-framework-composition.md`.
+
+### 2026-06-24 — BCon working rule adopted [LOCKED]
+Adopted **BCon** ("Be concise" + no BS / no fluff / no sycophancy / only-valid / no-hallucinations
+/ ground-assumptions / steelman-then-leak) as the default working contract for all ns sessions —
+discussion, design, implementation. Defined identically in `custom-instructions` (claude.ai
+project) and `AGENTS.md` (repo/Claude Code) so the rule holds across session types. The user may
+type `BCon` mid-session to refresh context. BCon is tone+rigor; it does not override halt-at-gates,
+spike discipline, or external-claim verification — it is the manner in which those are delivered.
