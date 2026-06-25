@@ -32,35 +32,37 @@ _Last updated: 2026-06-25. Seam Contract **v1.0** (frozen)._
   and §9.1 local-derived-state rule in place. This is the founding semantics.
 - **Governance scaffold:** Complete. Charter, custom instructions, AGENTS.md, decision log,
   implementation-state all in place.
-- **Code:** Phase 1 harness complete. `src/core/types.ts` (seam types), `src/transports/in-process.ts`,
-  `test/harness/` (seeded RNG, channel simulator, stubs, convergence harness, 10 gate tests).
-  All passing. `tsc --noEmit` clean. Real engine (`Feed.apply` + cursor/replay) not yet built —
-  that is Phase 1b.
+- **Code:** Phase 1b complete. Real `Engine` (`Feed` + `ScopeRouter`), `LWWClockStrategy`,
+  engine gate tests. 18 tests passing. `tsc --noEmit` clean. `concurrent` → `Resolver` path
+  deferred to Phase 2 (unreachable under LWW).
 
 ### Locked (do not drift without an explicit superseding entry)
-- **Standalone** — `ns` has no dependency on any neutro sibling (including `nv`). Like every
-  neutro package, it stands alone; `nv` and other consumers may use it, but `ns` never depends
-  on them. No `neutro/*` runtime import ever enters `src/core`.
+- **Standalone** — `ns` has no dependency on any neutro sibling. No `neutro/*` runtime import
+  ever enters `src/core`.
 - **T1** — one discriminated `Change` type; `kind` encodes (idempotent, replay, ordering);
   heterogeneous batches; no feed-splitting.
 - **T2** — `Cursor` (ns-owned, concrete) vs. `Version` (strategy-owned, opaque); ns's only
   versioning act is `ClockStrategy.compare()`.
 - **T3** — `Lifetime` gates persistence + replay; ephemeral never advances the cursor / never
-  persisted / never replayed.
+  persisted / never replayed. **Verified in Phase 1b (P4a–c).**
 - **T4** — detect-not-decide; `Conflict` payload is value-opaque; four-valued `Resolution`;
-  `defer` (open conflict) tolerated by contract.
+  `defer` tolerated by contract. LWW path (take-by-version, no Resolver) verified in Phase 1b
+  (P5). `concurrent` → Resolver path deferred to Phase 2.
 - **T5** — per-scope causal order; cross-scope total order is an anti-promise.
 - **§7** — delivery guarantees live above the transport; `send` resolves on hand-off, not ack.
 - **OpChange.version** — optional; present only for op-transport-with-local-fold consumers.
-- **Framework adapters = subpath exports** — `@neutro/sync/adapters/react`, `/adapters/svelte`,
-  etc., on the single package (not separate packages). Framework peers are `optional` peer deps;
-  each adapter subpath is independently tree-shakeable. The core API is plain TS (callbacks +
-  promises, no framework type); adapters are additive over the `subscribe`/`snapshot`/`emit`
-  binding seam. (Write/emit ergonomics remain part of G2 — see design note.)
-- **Project structure** — single published package, subpath exports, mirrors nv (see Charter §11).
-- **Harness channel semantics** — partition is structural buffering, not probabilistic fault
-  injection; partitioned channels consume no RNG on enqueue. `drainToQuiescence` is round-based.
-  `assertConverged()` throws on a single-replica harness (per spike rule). See 2026-06-25 entry.
+- **Framework adapters = subpath exports** — single package, optional peer deps,
+  independently tree-shakeable. Write/emit ergonomics remain part of G2.
+- **Project structure** — single published package, subpath exports, mirrors nv.
+- **Harness channel semantics** — partition is structural buffering; partitioned channels
+  consume no RNG on enqueue; `drainToQuiescence` is round-based; `assertConverged()` throws
+  on single-replica. See 2026-06-25 Phase 1 entry.
+- **LWW behind the ClockStrategy slot** — `LWWClockStrategy` is the first concrete strategy.
+  Never inlined into `Feed.apply`; engine calls only `compare()`. Phase 2 (logical clock,
+  CRDT position) is pure addition. See 2026-06-25 Phase 1b entry.
+- **`concurrent` path deferred to Phase 2** — unreachable under LWW. Branch present in
+  engine; Phase 2 entry condition is a strategy that produces `concurrent` plus a concrete
+  `Resolver`. See 2026-06-25 Phase 1b entry.
 
 ### Open gates (surfaced, NOT decided — do not build past)
 - **G2 — Public API surface**: consumer-facing client/builder ergonomics atop the frozen seam.
@@ -69,8 +71,7 @@ _Last updated: 2026-06-25. Seam Contract **v1.0** (frozen)._
   engine per consumer. Addressed by the conformance suite; not blocking early phases.
 
 ### Superseded / resolved
-- **G1 — Substrate** — RESOLVED 2026-06-24: `ns` is standalone (option a). Was opened earlier
-  the same day; closed once confirmed `ns` follows the neutro standalone pattern. See Log.
+- **G1 — Substrate** — RESOLVED 2026-06-24: `ns` is standalone (option a).
 
 ---
 
@@ -200,3 +201,45 @@ Gate file written before code per AGENTS.md discipline: `docs/gates/phase1-conve
    Phase 1b:** the real engine gate must explicitly claim and test both T3 (ephemeral never
    advances cursor, never persisted, never replayed) and T4 (conflict detected and routed to
    resolver). Neither is verified by the current 10-test suite.
+
+### 2026-06-25 — LWW pulled forward; `concurrent` path deferred to Phase 2 [LOCKED]
+**LWW as first concrete `ClockStrategy` (pulled forward from Phase 2).**
+`LWWClockStrategy` is built in `src/strategies/lww.ts` and pointed at the `ClockStrategy`
+slot in `Engine`. It is never inlined into `Feed.apply` — the engine calls only
+`ClockStrategy.compare()`; LWW is one implementation of that slot. Consequence: Phase 2
+(logical clock, CRDT position) is a pure addition of new slot implementations, not a refactor.
+
+**`concurrent` → `Resolver` path consciously deferred.** LWW `compare()` never returns
+`"concurrent"` — that is LWW's defining property. The conflict-routing branch in
+`Engine._applyState` and `Engine._applyOp` exists and is documented, but is unreachable
+in Phase 1b. It is not a `throw new Error("unreachable")` — it is an honest deferred arm.
+
+**Phase 2 entry condition (locked):** at least one strategy that returns `"concurrent"`
+(logical/hybrid clock or CRDT position) must be implemented, a test must drive two replicas
+into a genuine `"concurrent"` outcome, route it to a `Resolver`, and verify the resolution
+is applied. This is the first gate item Phase 2 must claim.
+
+### 2026-06-25 — Phase 1b engine built and verified [LOCKED]
+Implemented the real `Feed` + `ScopeRouter` engine and LWW as the first concrete
+`ClockStrategy`. Gate file written before code: `docs/gates/phase1b-engine.md`.
+18 tests passing (`tsc --noEmit` clean): 10 original harness tests (P1 — harness unmodified)
++ 8 new engine tests (P2–P5). Test/harness files untouched.
+
+**Files landed:**
+- `src/core/engine.ts` — `Engine implements Feed, ScopeRouter`. In-memory. T1 kind
+  branching; T2 version opacity; T3 lifetime fork; T4 `concurrent` deferred; T5 per-scope
+  causal order via synchronous subscription dispatch.
+- `src/strategies/lww.ts` — `LWWClockStrategy`. Monotonic integer counter; `compare()`
+  returns `"before"` or `"after"`, never `"concurrent"`.
+- `test/engine/engine.test.ts` — 8 tests wired via `Engine.subscribe()` + `ChannelSimulator`
+  (production API, no harness internals).
+
+**Gate results:**
+- P2: LWW contention — higher version wins on both replicas under fault injection. ✓
+- P3: op dedup — duplicate-delivered op applied exactly once (seenIds). ✓
+- P4a: cursor does not advance on ephemeral changes (T3). ✓
+- P4b: ephemeral changes absent from `changes()` replay (T3). ✓
+- P4c: ephemeral changes present in `snapshot()` — they are current state (T3). ✓
+- P5: state collision resolved take-by-version; throwing `Resolver` never invoked (T4 LWW path). ✓
+- P6: `concurrent` → `Resolver` path named deferral; branch present in engine. ✓
+- P7: `tsc --noEmit` clean; vitest 18/18. ✓

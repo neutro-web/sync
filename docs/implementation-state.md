@@ -13,17 +13,18 @@ the source, the source wins and this file is stale → fix it.
 **Maintenance.** Update in the same pass that lands code, as a ready-to-commit edit (same
 discipline as log entries). Keep it to roughly this length; detail belongs in the code.
 
-Last verified against source: **2026-06-25 (Phase 1 harness complete).** Seam Contract **v1.0**.
+Last verified against source: **2026-06-25 (Phase 1b engine complete).** Seam Contract **v1.0**.
 
 ---
 
-## Status: PHASE 1 HARNESS COMPLETE — real engine not yet built
+## Status: PHASE 1b ENGINE COMPLETE — strategies and real transports not yet built
 
-The convergence harness exists and all 10 gate tests pass. `src/core/types.ts` expresses the
-full seam contract in TypeScript. `src/transports/in-process.ts` is the first real transport.
-The harness stubs (`NonConvergingFeed`, `TriviallyCorrectFeed`) serve as acceptance instruments
-only — they are not the real engine. `Feed.apply` + cursor/replay is the next thing to build
-(Phase 1b); it must pass this harness without touching it.
+The real `Feed` engine (`Engine` class) is built and verified. `LWWClockStrategy` is the first
+concrete `ClockStrategy`. All 18 tests pass (`tsc --noEmit` clean). The stubs in
+`test/harness/stubs.ts` are unchanged — the real engine lives alongside them, verified by
+separate tests in `test/engine/`. T3 (ephemeral off durable path) and T4 LWW path are now
+tested. The `concurrent` → `Resolver` conflict path is consciously deferred to Phase 2
+(unreachable under LWW). Phase 2 adds logical/hybrid clock and CRDT-position strategies.
 
 ---
 
@@ -37,9 +38,10 @@ not built · **—** = not created.
 | File | Status | Notes |
 |---|---|---|
 | `docs/seam-contract.md` | REAL | Frozen seam semantics, v1.0. Eight seam types + T1–T5 + §9 consumer map + §9.1 local-derived rule. Authoritative for semantics. |
-| `docs/decision-log.md` | REAL | Current-State + append-only Log. T1–T5 + standalone + harness findings locked; G2–G3 open. |
+| `docs/decision-log.md` | REAL | Current-State + append-only Log. T1–T5 + standalone + harness + engine findings locked; G2–G3 open. |
 | `docs/implementation-state.md` | REAL | This file. |
-| `docs/gates/phase1-convergence-harness.md` | REAL | Six gate items (G1–G6). Written before code per AGENTS.md discipline. All passing. |
+| `docs/gates/phase1-convergence-harness.md` | REAL | Six gate items (G1–G6). Written before code. All passing. |
+| `docs/gates/phase1b-engine.md` | REAL | Seven gate items (P1–P7). Written before code. All passing. P6 is named deferral. |
 | `AGENTS.md` | REAL | Working instructions (house pattern, ns-tuned). All locked decisions reflected. |
 | `CLAUDE.md` | REAL | One-liner pointing to AGENTS.md. |
 | Founding Charter | REAL | Project-knowledge orientation (lives in the claude.ai project knowledge). |
@@ -55,18 +57,16 @@ not built · **—** = not created.
 ### `src/core/` → `@neutro/sync/core` (the engine)
 | File | Status | Notes |
 |---|---|---|
-| `src/core/types.ts` | REAL | Full TypeScript expression of seam contract v1.0. All eight seam types: `Change`/`StateChange`/`OpChange`/`VersionedChange`, `Cursor`/`Version`/`ClockStrategy`, `Lifetime`, `ChangeBatch`/`Snapshot`/`Feed`, `Conflict`/`Resolution`/`Resolver`, `Scope`/`Subscription`/`ScopeRouter`, `Transport`, opaque tokens. Factory helpers: `makeChangeId`, `makeScope`, `makeConflictUnit`, `makeCursor`, `DURABLE`, `ephemeral`. `ChangeBase` exported. |
-| change application / `Feed.apply` | — | **Phase 1b.** Branches on `kind`: idempotent state (LWW via ClockStrategy); dedup-by-id op; op-with-version fold + conflict detection. Must pass the Phase 1 harness. |
-| cursor / replay (`Feed.changes`) | — | Phase 1b. Durable-only cursor advance; replay-from-checkpoint. |
-| snapshot (`Feed.snapshot`) | — | Phase 1b. Current-state-on-subscribe (ephemeral reconnect + memoryless-transport durable). |
-| conflict detection | — | Phase 1b. Calls `ClockStrategy.compare`; builds value-opaque `Conflict`; routes to `Resolver`. |
-| scope routing (`ScopeRouter`) | — | Phase 1b. Per-scope causal-order subscription. |
+| `src/core/types.ts` | REAL | Full TypeScript expression of seam contract v1.0. All eight seam types: `Change`/`StateChange`/`OpChange`/`VersionedChange`, `Cursor`/`Version`/`ClockStrategy`, `Lifetime`, `ChangeBatch`/`Snapshot`/`Feed`, `Conflict`/`Resolution`/`Resolver`, `Scope`/`Subscription`/`ScopeRouter`, `Transport`, opaque tokens. Factory helpers: `makeChangeId`, `makeScope`, `makeConflictUnit`, `makeCursor`, `DURABLE`, `ephemeral`. |
+| `src/core/engine.ts` | REAL | `Engine implements Feed, ScopeRouter`. In-memory. T1 kind branching; T2 version opacity (only `compare()` called); T3 lifetime fork (ephemeral off durable path); T4 `concurrent` branch present and deferred; T5 per-scope causal order via synchronous subscription dispatch. `getCursor(scope)` for test assertions. |
+| conflict detection (`concurrent` path) | DEFERRED | **Phase 2 entry condition.** The `concurrent` arm in `_applyState` and `_applyOp` exists, is documented, and returns without applying. A strategy returning `concurrent` (logical/CRDT clock) plus a concrete `Resolver` are required to exercise it. |
+| scope routing (`ScopeRouter`) | REAL | `Engine.subscribe(scope, { onBatch, onConflict })` → `Subscription`. Per-scope; fires synchronously on accepted changes. |
 
 ### `src/strategies/` → `@neutro/sync/strategies`
 | File | Status | Notes |
 |---|---|---|
-| LWW `ClockStrategy` + resolver | — | Phase 2. |
-| logical/hybrid clock | — | Phase 2. |
+| `src/strategies/lww.ts` | REAL | `LWWClockStrategy implements ClockStrategy`. Monotonic integer counter; `mint()` increments; `compare()` returns `"before"` or `"after"`, **never `"concurrent"`**. Internal version shape: `{ _ts: number }`. Strategy-owned, opaque to engine. |
+| logical/hybrid clock | — | Phase 2. First strategy to produce `concurrent` — required to exercise T4 conflict path. |
 | CRDT-position strategy | — | Phase 2. |
 
 ### `src/transports/` → `@neutro/sync/transports`
@@ -86,9 +86,14 @@ not built · **—** = not created.
 |---|---|---|
 | `test/harness/seeded-rng.ts` | REAL | `mulberry32(seed)` — deterministic 32-bit PRNG returning `() => number` in [0, 1). |
 | `test/harness/channel-simulator.ts` | REAL | `ChannelSimulator(seed, FaultConfig)`. Drain-based; deterministic drop/reorder/duplicate/partition. Consumes exactly 4 RNG values per non-partitioned `enqueue()` (0 when partitioned — structural, not probabilistic). Stats: sent/dropped/reordered/duplicated/delivered. |
-| `test/harness/stubs.ts` | STUB | `NonConvergingFeed` (local-only, never forwards — proves harness RED). `TriviallyCorrectFeed` (dedup by id + sync forward via `onForward` — proves harness GREEN). `LocalState` (LWW by `Version._seq`). `makeStubVersion(seq)`. Replaced by real engine in Phase 1b. |
-| `test/harness/convergence-harness.ts` | REAL | `ConvergenceHarness(opts)`. N replicas, N×(N-1) directed channels seeded `channelSeed + i*100 + j`. `applyLocal(id, batch)`, `drainToQuiescence(maxRounds)` (round-based), `assertConverged()` (throws on <2 replicas), `throwIfDrainErrors()` (surfaces async apply rejections for Phase 1b). Partition/reconnect controls. Channel stats aggregation. |
-| `test/harness/harness.test.ts` | REAL | 10 tests, all passing. Covers G1–G6: divergence detection, convergence on perfect channel, deterministic runs, fault injection (drop/dup/partition/reorder), ≥2-replica enforcement. |
+| `test/harness/stubs.ts` | STUB | `NonConvergingFeed` / `TriviallyCorrectFeed` / `LocalState` / `makeStubVersion`. Acceptance instruments for the harness; not replaced by the real engine (they coexist). |
+| `test/harness/convergence-harness.ts` | REAL | `ConvergenceHarness(opts)`. N replicas, N×(N-1) directed channels. `applyLocal`, `drainToQuiescence` (round-based), `assertConverged` (throws on <2 replicas), `throwIfDrainErrors`, partition/reconnect controls. |
+| `test/harness/harness.test.ts` | REAL | 10 tests, all passing (G1–G6). Untouched by Phase 1b. |
+
+### `test/engine/`
+| File | Status | Notes |
+|---|---|---|
+| `test/engine/engine.test.ts` | REAL | 8 tests covering P2–P5. Gossip wired via `Engine.subscribe()` + `ChannelSimulator` (no harness dependency). P2: LWW contention; P3: op dedup; P4a–c: T3 ephemeral assertions; P5: take-by-version with throwing Resolver. |
 
 ### `integration/`
 | File | Status | Notes |
@@ -101,54 +106,68 @@ not built · **—** = not created.
 
 ### Production seams (real)
 
+**`Engine.apply(batch: ChangeBatch): Promise<void>`**
+Branches on `change.kind`. State: global seenIds dedup, then `ClockStrategy.compare(incoming,
+existing)` — `"after"` accepts, `"before"` skips, `"concurrent"` deferred. Op (no version):
+seenIds dedup only. Op (with version): seenIds + version compare. T3 fork: durable → advance
+`cursorSeq` + append to `durableLog`; ephemeral → update `stateUnits` only. Fires subscriptions
+synchronously for accepted changes (required for drain-round correctness). Returns
+`Promise.resolve()` — synchronous internally.
+
+**`Engine.changes(scope, since: Cursor | null): AsyncIterable<ChangeBatch>`**
+Yields durable log entries with `seq > since._seq` (or all if `since` is null) as a single
+`ChangeBatch`. Ephemeral changes never appear. Cursor on the yielded batch reflects the last
+durable seq.
+
+**`Engine.snapshot(scope): Promise<Snapshot>`**
+Returns all entries in `stateUnits` (current state, both durable and ephemeral). No cursor.
+Ephemeral values are live current state even though they are not in the durable log.
+
+**`Engine.subscribe(scope, { onBatch, onConflict }): Subscription`**
+Registers per-scope handlers. `onBatch` fires synchronously in `apply()` for each accepted
+batch. `onConflict` is wired but not yet invoked (awaits Phase 2 `concurrent` path).
+`unsubscribe()` is idempotent.
+
+**`Engine.getCursor(scope): Cursor`**
+Returns `makeCursor(scope, cursorSeq)`. Not on the `Feed` interface — test assertion helper only.
+
+**`LWWClockStrategy.mint(_prev?): Version`**
+Increments internal counter, returns `{ _ts: counter }` cast to `Version`. Monotonically
+increasing per instance.
+
+**`LWWClockStrategy.compare(a, b): "before" | "after" | "concurrent"`**
+Compares `_ts` fields. Returns `"after"` if `a._ts > b._ts`, `"before"` otherwise. Never
+returns `"concurrent"`.
+
 **`InProcessTransport.send(batch: ChangeBatch): Promise<void>`**
-Calls `channelFn(batch)` synchronously, returns `Promise.resolve()`. Resolves on hand-off, not
-ack (§7). `channelFn` defaults to a no-op; harness injects the channel simulator. Silent discard
-if `channelFn` is never set — correct behavior, not a bug, but worth noting in tests.
-
-**`InProcessTransport._deliver(batch: ChangeBatch): void`**
-Called by the harness channel to push an inbound batch. Calls `_onBatch(batch)` if registered
-and not closed. Checked for `_closed` before dispatch.
-
-**`InProcessTransport._setConnected(connected: boolean): void`**
-Fires registered `onConnect` / `onDisconnect` handlers. The T3 reconnect fork (replay vs.
-snapshot) is triggered by these handlers in the real engine — not yet implemented.
+Calls `channelFn(batch)` synchronously, returns `Promise.resolve()`. Resolves on hand-off (§7).
 
 ### Harness-internal seams (not production)
 
 **`TriviallyCorrectFeed.onForward?: (batch: ChangeBatch) => void`**
-Set by `ConvergenceHarness` to route accepted changes to peer channels. Called synchronously
-inside `apply()` after dedup — required for drain correctness (drain is synchronous; any await
-here would break the round-based loop).
+Set by `ConvergenceHarness` for gossip routing. Called synchronously in `apply()` — required
+for drain-round correctness.
 
 **`ConvergenceHarness.throwIfDrainErrors(): void`**
-Surfaces errors from async `apply()` calls during drain. No-op for stubs (synchronous). Phase 1b
-tests should call this after `drainToQuiescence()`.
-
-### Seams pending (Phase 1b will fill these)
-
-`Feed.apply` ⟷ `ClockStrategy.compare` ⟷ `Resolver.resolve`; `Feed.changes` ⟷ cursor store;
-`ScopeRouter.subscribe` ⟷ feed delivery.
+Surfaces errors from async `apply()` calls during drain. No-op for stubs; use in Phase 2+
+engine tests after `drainToQuiescence()`.
 
 ---
 
 ## Known gaps / defects
 
-- **T3 unverified.** `LocalState` (stubs) applies all changes regardless of `lifetime`. The
-  T3 fork — ephemeral never advances cursor, never persisted, never replayed — is correctly
-  specified in `types.ts` but not exercised by any current test. Phase 1b gate must claim and
-  test it explicitly.
-- **T4 unverified.** No conflict detection in stubs. `Conflict` / `Resolver` types exist but
-  the detect-and-route path is entirely untested. Phase 1b gate must claim and test it.
-- **Op changes untested.** All 10 gate tests use `kind: "state"` only. The `seenIds` dedup
-  path for ops, `appliedOpIds` comparison in `assertConverged`, and `LocalState`'s op branch
-  are dead code relative to the current suite.
-- **LWW contention untested.** No test exercises same-unit concurrent writes from two replicas
-  to verify the higher `Version._seq` wins after convergence.
-- **`Feed.changes()` and `Feed.snapshot()` never called.** Both stub implementations return
-  empty values and are never exercised. Replay and snapshot seams are untested.
+- **`concurrent` → `Resolver` path untested.** The branch exists in `Engine._applyState` and
+  `Engine._applyOp` and is documented as deferred. Phase 2 entry condition: a strategy
+  producing `concurrent` plus a concrete `Resolver` must exercise and verify this path.
 - **`InProcessTransport` connect/disconnect lifecycle untested.** `_setConnected` fires
-  handlers but no test verifies the T3 reconnect fork it is meant to drive.
+  handlers but no test verifies the T3 reconnect fork (replay vs. snapshot on reconnect)
+  it is meant to drive. Deferred to Phase 3 (real transport work).
+- **`seenIds` grows unboundedly.** No eviction or TTL. Fine for Phase 1b in-memory usage;
+  a real persistence layer will need a compaction strategy.
+- **`changes()` yields all entries as one batch.** Fine for Phase 1b; a production
+  implementation may want paginated/chunked batches for large logs.
+- **Op-with-version conflict path untested.** The `opUnitVersions` tracker exists but
+  no test exercises a version-compare collision on an op change. Deferred to Phase 2.
 
 ---
 
@@ -157,4 +176,6 @@ tests should call this after `drainToQuiescence()`.
 - **Standalone (locked)** — no `neutro/*` runtime dependency ever enters `src/core`. A reactive
   consumer binds to `ns` on its own side; there is no `ns`-side adapter package in core scope.
 - **G2 Public API** — do not create a frozen public client/builder; sketches are design docs.
-- **G3 LCD-risk** — the conformance suite is the eventual evidence; not blocking Phase 1.
+- **G3 LCD-risk** — the conformance suite is the eventual evidence; not blocking Phase 2.
+- **Phase 2 entry condition** — `concurrent` → `Resolver` path requires a strategy that
+  produces `concurrent` (logical/hybrid clock or CRDT position). That is Phase 2's first gate.
