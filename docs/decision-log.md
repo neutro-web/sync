@@ -25,14 +25,17 @@
 
 ## Current State
 
-_Last updated: 2026-06-24. Seam Contract **v1.0** (frozen)._
+_Last updated: 2026-06-25. Seam Contract **v1.0** (frozen)._
 
 ### Status at a glance
 - **Seam contract:** FROZEN at v1.0. T1–T5 ratified; eight seam types defined; §9 consumer map
   and §9.1 local-derived-state rule in place. This is the founding semantics.
-- **Governance scaffold:** Bootstrap in progress. Charter, custom instructions, AGENTS.md
-  authored. decision-log + implementation-state seeded (this file + its sibling).
-- **Code:** None yet. No `src/`. Phase 1 (reference engine) not started.
+- **Governance scaffold:** Complete. Charter, custom instructions, AGENTS.md, decision log,
+  implementation-state all in place.
+- **Code:** Phase 1 harness complete. `src/core/types.ts` (seam types), `src/transports/in-process.ts`,
+  `test/harness/` (seeded RNG, channel simulator, stubs, convergence harness, 10 gate tests).
+  All passing. `tsc --noEmit` clean. Real engine (`Feed.apply` + cursor/replay) not yet built —
+  that is Phase 1b.
 
 ### Locked (do not drift without an explicit superseding entry)
 - **Standalone** — `ns` has no dependency on any neutro sibling (including `nv`). Like every
@@ -55,6 +58,9 @@ _Last updated: 2026-06-24. Seam Contract **v1.0** (frozen)._
   promises, no framework type); adapters are additive over the `subscribe`/`snapshot`/`emit`
   binding seam. (Write/emit ergonomics remain part of G2 — see design note.)
 - **Project structure** — single published package, subpath exports, mirrors nv (see Charter §11).
+- **Harness channel semantics** — partition is structural buffering, not probabilistic fault
+  injection; partitioned channels consume no RNG on enqueue. `drainToQuiescence` is round-based.
+  `assertConverged()` throws on a single-replica harness (per spike rule). See 2026-06-25 entry.
 
 ### Open gates (surfaced, NOT decided — do not build past)
 - **G2 — Public API surface**: consumer-facing client/builder ergonomics atop the frozen seam.
@@ -141,3 +147,56 @@ discussion, design, implementation. Defined identically in `custom-instructions`
 project) and `AGENTS.md` (repo/Claude Code) so the rule holds across session types. The user may
 type `BCon` mid-session to refresh context. BCon is tone+rigor; it does not override halt-at-gates,
 spike discipline, or external-claim verification — it is the manner in which those are delivered.
+
+### 2026-06-25 — Phase 1 harness built and verified [LOCKED]
+Implemented the multi-replica convergence harness (the acceptance instrument for all Phase 1
+work). Built stub-first: `NonConvergingFeed` proved the harness goes RED before
+`TriviallyCorrectFeed` proved it goes GREEN. 10 gate tests passing; `tsc --noEmit` clean.
+Gate file written before code per AGENTS.md discipline: `docs/gates/phase1-convergence-harness.md`.
+
+**Files landed:**
+- `src/core/types.ts` — TypeScript expression of the frozen seam contract v1.0. All eight seam
+  types: `Change`/`StateChange`/`OpChange`/`VersionedChange`, `Cursor`/`Version`/`ClockStrategy`,
+  `Lifetime`, `ChangeBatch`/`Snapshot`/`Feed`, `Conflict`/`Resolution`/`Resolver`,
+  `Scope`/`Subscription`/`ScopeRouter`, `Transport`, opaque tokens + factory helpers.
+  `ChangeBase` exported (Phase 1b engine will branch on `kind` across the common fields).
+- `src/transports/in-process.ts` — `InProcessTransport implements Transport`. `send()` resolves
+  on `channelFn` hand-off (§7). `channelFn` injectable by harness; `_deliver()` for inbound;
+  `_setConnected()` fires connect/disconnect handlers (T3 reconnect lifecycle).
+- `test/harness/seeded-rng.ts` — `mulberry32(seed)` deterministic PRNG.
+- `test/harness/channel-simulator.ts` — `ChannelSimulator`. Drain-based; deterministic
+  drop/reorder/duplicate/partition. Stats: sent/dropped/reordered/duplicated/delivered.
+- `test/harness/stubs.ts` — `NonConvergingFeed` (local-only, never forwards — harness RED),
+  `TriviallyCorrectFeed` (dedup by id + sync forward via `onForward` — harness GREEN),
+  `LocalState` (LWW by `Version._seq`), `makeStubVersion`.
+- `test/harness/convergence-harness.ts` — `ConvergenceHarness`. N replicas, N×(N-1) directed
+  channels seeded `channelSeed + i*100 + j`. `applyLocal`, `drainToQuiescence` (round-based),
+  `assertConverged` (throws on <2 replicas), `throwIfDrainErrors` (surfaces async apply
+  rejections for Phase 1b), partition/reconnect controls, channel stats aggregation.
+- `test/harness/harness.test.ts` — 10 tests covering G1–G6.
+
+**Four implementation findings recorded as locked:**
+
+1. **Partition ≠ fault injection.** Batches enqueued during a partition bypass probabilistic
+   fault rolls and buffer directly. `reconnect()` restores draining. This matches T3 reconnect
+   semantics: a transport must buffer while cut, not discard. Consequence: `enqueue()` during
+   partition consumes **zero** RNG values (structural state, not probabilistic). The 4-roll
+   determinism guarantee applies only to the non-partitioned path. The two paths are
+   intentionally asymmetric and correctly documented.
+
+2. **`drainToQuiescence` must be round-based.** A single sweep is not sufficient. Delivering
+   a batch from channel i→j causes `TriviallyCorrectFeed` to call `onForward` synchronously,
+   which enqueues into channels j→k. Those new entries must be picked up in a subsequent
+   drain round. The `splice(0)` snapshot in `ChannelSimulator.drain()` enforces that
+   same-round deliveries do not re-enter the current drain pass.
+
+3. **`assertConverged()` throws on a single-replica harness.** Per AGENTS.md spike rule:
+   a single-replica convergence check is vacuous — the sync property requires two or more
+   replicas to diverge before reconciliation can be demonstrated.
+
+4. **T3 and T4 are consciously unimplemented in the stubs.** `LocalState` applies all changes
+   regardless of `lifetime` (T3 fork not implemented); there is no conflict detection (T4 not
+   in harness scope). These are correct omissions for a Phase 1 stub. **Consequence for
+   Phase 1b:** the real engine gate must explicitly claim and test both T3 (ephemeral never
+   advances cursor, never persisted, never replayed) and T4 (conflict detected and routed to
+   resolver). Neither is verified by the current 10-test suite.
