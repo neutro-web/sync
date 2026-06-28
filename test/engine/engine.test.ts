@@ -365,6 +365,165 @@ describe("P4 · T3: ephemeral changes are off the durable path", () => {
 });
 
 // ---------------------------------------------------------------------------
+// P8 — Reconnect replay: missed changes recovered via changes(since)
+// ---------------------------------------------------------------------------
+
+describe("P8 · Reconnect replay: missed changes recovered via changes(since)", () => {
+  it("replica B catches up via changes(scope, cursor) after missing writes during partition", async () => {
+    const clock = new LWWClockStrategy();
+    const scope = makeScope("doc-8");
+
+    const engineA = new Engine(new LWWClockStrategy());
+    const engineB = new Engine(new LWWClockStrategy());
+
+    // A applies three durable state changes; B receives none (simulates partition).
+    const v1 = clock.mint();
+    const v2 = clock.mint();
+    const v3 = clock.mint();
+    await engineA.apply(makeStateBatch(scope, "x", "x-val", "a1", v1));
+    await engineA.apply(makeStateBatch(scope, "y", "y-val", "a2", v2));
+    await engineA.apply(makeStateBatch(scope, "z", "z-val", "a3", v3));
+
+    // B missed all writes — cursor is at seq 0.
+    const cursorBefore = engineB.getCursor(scope);
+    expect(cursorBefore._seq).toBe(0);
+
+    // Reconnect: B requests all changes from A since its cursor.
+    for await (const batch of engineA.changes(scope, cursorBefore)) {
+      await engineB.apply(batch);
+    }
+
+    // After replay: B's snapshot matches A's for every unit.
+    const stateA = await getState(engineA, scope);
+    const stateB = await getState(engineB, scope);
+    expect(stateB.get("x")).toBe(stateA.get("x"));
+    expect(stateB.get("y")).toBe(stateA.get("y"));
+    expect(stateB.get("z")).toBe(stateA.get("z"));
+
+    // B's cursor advanced to A's terminal seq.
+    expect(engineB.getCursor(scope)._seq).toBe(engineA.getCursor(scope)._seq);
+
+    // T3 sanity: replay yielded only durable ids (changes() never includes ephemeral).
+    const replayedIds = new Set<string>();
+    for await (const batch of engineB.changes(scope, null)) {
+      for (const c of batch.changes) replayedIds.add(c.id.value);
+    }
+    expect(replayedIds.has("c-x-a1")).toBe(true);
+    expect(replayedIds.has("c-y-a2")).toBe(true);
+    expect(replayedIds.has("c-z-a3")).toBe(true);
+  });
+
+  it("partial replay: changes(scope, cursor) yields only entries B missed", async () => {
+    const clock = new LWWClockStrategy();
+    const scope = makeScope("doc-8b");
+
+    const engineA = new Engine(new LWWClockStrategy());
+    const engineB = new Engine(new LWWClockStrategy());
+
+    // B receives the first two changes before the partition.
+    const v1 = clock.mint();
+    const v2 = clock.mint();
+    await engineA.apply(makeStateBatch(scope, "a", "a-val", "b1", v1));
+    await engineB.apply(makeStateBatch(scope, "a", "a-val", "b1", v1));
+    await engineA.apply(makeStateBatch(scope, "b", "b-val", "b2", v2));
+    await engineB.apply(makeStateBatch(scope, "b", "b-val", "b2", v2));
+
+    // B's cursor after two durable changes.
+    const cursorB = engineB.getCursor(scope); // seq=2
+
+    // A applies two more changes that B misses (partition).
+    const v3 = clock.mint();
+    const v4 = clock.mint();
+    await engineA.apply(makeStateBatch(scope, "c", "c-val", "b3", v3));
+    await engineA.apply(makeStateBatch(scope, "d", "d-val", "b4", v4));
+
+    // Reconnect: B requests only what it missed (since cursorB, seq=2).
+    for await (const batch of engineA.changes(scope, cursorB)) {
+      await engineB.apply(batch);
+    }
+
+    // B now holds all 4 values.
+    const stateB = await getState(engineB, scope);
+    expect(stateB.get("a")).toBe("a-val");
+    expect(stateB.get("b")).toBe("b-val");
+    expect(stateB.get("c")).toBe("c-val");
+    expect(stateB.get("d")).toBe("d-val");
+
+    // B's durable log has exactly 4 entries — no double-counting of b1/b2.
+    const replayedIds = new Set<string>();
+    for await (const batch of engineB.changes(scope, null)) {
+      for (const c of batch.changes) replayedIds.add(c.id.value);
+    }
+    expect(replayedIds.size).toBe(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P9 — 3-replica contention under partition
+// ---------------------------------------------------------------------------
+
+describe("P9 · 3-replica contention under partition", () => {
+  it("all 3 replicas converge on globally-highest version after partition/reconnect", async () => {
+    const clock = new LWWClockStrategy();
+    const scope = makeScope("doc-9");
+
+    const engines = [
+      new Engine(new LWWClockStrategy()),
+      new Engine(new LWWClockStrategy()),
+      new Engine(new LWWClockStrategy()),
+    ];
+
+    const { channels, allChannels } = setupGossip(engines, scope, 900);
+
+    // Phase 1: all 3 write the same unit; highest version (v3) should win everywhere.
+    const v1 = clock.mint(); // _ts=1
+    const v2 = clock.mint(); // _ts=2
+    const v3 = clock.mint(); // _ts=3
+    await engines[0]!.apply(makeStateBatch(scope, "u1", "val-v1", "r0-p1", v1));
+    await engines[1]!.apply(makeStateBatch(scope, "u1", "val-v2", "r1-p1", v2));
+    await engines[2]!.apply(makeStateBatch(scope, "u1", "val-v3", "r2-p1", v3));
+    await drainChannels(allChannels);
+
+    for (const engine of engines) {
+      expect((await getState(engine, scope)).get("u1")).toBe("val-v3");
+    }
+
+    // Phase 2: isolate replica 2 from all others.
+    channels.get("0→2")!.partition();
+    channels.get("1→2")!.partition();
+    channels.get("2→0")!.partition();
+    channels.get("2→1")!.partition();
+
+    // Replica 2 writes a competing version while isolated (v_island, lower _ts).
+    // Replicas 0 and 1 write a higher version (v_winner, higher _ts).
+    const v_island = clock.mint(); // _ts=4
+    const v_winner = clock.mint(); // _ts=5
+    await engines[2]!.apply(makeStateBatch(scope, "u1", "val-island", "r2-island", v_island));
+    await engines[0]!.apply(makeStateBatch(scope, "u1", "val-winner", "r0-winner", v_winner));
+
+    // Drain only between replicas 0 and 1 (2 is cut off).
+    await drainChannels([channels.get("0→1")!, channels.get("1→0")!]);
+
+    // Verify pre-reconnect state: 0 and 1 on v_winner, 2 still on v_island.
+    expect((await getState(engines[0]!, scope)).get("u1")).toBe("val-winner");
+    expect((await getState(engines[1]!, scope)).get("u1")).toBe("val-winner");
+    expect((await getState(engines[2]!, scope)).get("u1")).toBe("val-island");
+
+    // Phase 3: reconnect replica 2 and drain to quiescence.
+    channels.get("0→2")!.reconnect();
+    channels.get("1→2")!.reconnect();
+    channels.get("2→0")!.reconnect();
+    channels.get("2→1")!.reconnect();
+    await drainChannels(allChannels);
+
+    // All 3 must converge on the globally-highest version (_ts=5, val-winner).
+    for (const engine of engines) {
+      expect((await getState(engine, scope)).get("u1")).toBe("val-winner");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // P5 — T4 (LWW path): take-by-version, Resolver never invoked
 // ---------------------------------------------------------------------------
 

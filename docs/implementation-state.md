@@ -93,7 +93,7 @@ not built · **—** = not created.
 ### `test/engine/`
 | File | Status | Notes |
 |---|---|---|
-| `test/engine/engine.test.ts` | REAL | 8 tests covering P2–P5. Gossip wired via `Engine.subscribe()` + `ChannelSimulator` (no harness dependency). P2: LWW contention; P3: op dedup; P4a–c: T3 ephemeral assertions; P5: take-by-version with throwing Resolver. |
+| `test/engine/engine.test.ts` | REAL | 11 tests covering P2–P5, P8–P9. Gossip wired via `Engine.subscribe()` + `ChannelSimulator` (no harness dependency). P2: LWW contention; P3: op dedup; P4a–c: T3 ephemeral assertions; P5: take-by-version with throwing Resolver; P8: reconnect replay via `changes(since)`; P9: 3-replica contention under partition. 21 total tests passing. |
 
 ### `integration/`
 | File | Status | Notes |
@@ -156,18 +156,39 @@ engine tests after `drainToQuiescence()`.
 
 ## Known gaps / defects
 
-- **`concurrent` → `Resolver` path untested.** The branch exists in `Engine._applyState` and
-  `Engine._applyOp` and is documented as deferred. Phase 2 entry condition: a strategy
-  producing `concurrent` plus a concrete `Resolver` must exercise and verify this path.
-- **`InProcessTransport` connect/disconnect lifecycle untested.** `_setConnected` fires
-  handlers but no test verifies the T3 reconnect fork (replay vs. snapshot on reconnect)
-  it is meant to drive. Deferred to Phase 3 (real transport work).
-- **`seenIds` grows unboundedly.** No eviction or TTL. Fine for Phase 1b in-memory usage;
-  a real persistence layer will need a compaction strategy.
-- **`changes()` yields all entries as one batch.** Fine for Phase 1b; a production
-  implementation may want paginated/chunked batches for large logs.
-- **Op-with-version conflict path untested.** The `opUnitVersions` tracker exists but
-  no test exercises a version-compare collision on an op change. Deferred to Phase 2.
+### Finding #1 — `concurrent` arm silently drops the incoming change [HIGH — Phase 2 entry condition]
+`_applyState` and `_applyOp` call `this._seenIds.add(change.id.value)` then `return false`
+when `cmp === "concurrent"`. The comment says "hold both, do not silently decide" but the code
+holds **neither** — the incoming change is silently dropped and its id is marked seen, making
+it permanently invisible. The existing change is retained but the conflict is never routed to
+the `Resolver` or surfaced as `defer`. Inert under LWW (unreachable), but the instant a Phase 2
+strategy returns `concurrent` this is a **live T4 violation**. Phase 2 must trust the code over
+the comment: replace `return false` with a real route-to-Resolver / hold-as-defer, proven by a
+test that drives a genuine `concurrent` outcome.
+
+### Finding #2 — `_seenIds` grows unbounded [MED — Phase 3]
+Global id-dedup set, no eviction or TTL. Correct for the in-memory Phase 1b sandbox. A real
+persistence layer (Phase 3) needs a compaction or sliding-window eviction strategy.
+
+### Finding #3 — `Resolver` / `onConflict` are wired but never invoked [MED — note on P5]
+The constructor `resolver?` and `subscribe`'s `onConflict` callback are registered but
+`apply()` never reaches the call site (the only path that would invoke them is the `concurrent`
+arm, which returns first — Finding #1). Consequence: **P5's "throwing Resolver never invoked"
+passes trivially** — the Resolver is dead under *all* current paths, not just the LWW path.
+P5 is valid as far as it goes (LWW take-by-version correctly avoids the Resolver); it just
+proves less than its name suggests. Phase 2 must activate this wiring.
+
+### Deferred (reason recorded)
+- **`concurrent` code fix** → Phase 2 (needs a `concurrent`-producing strategy; spike rule
+  bars writing a test for an unreachable branch using only LWW).
+- **`_seenIds` eviction** → Phase 3 (persistence).
+- **`changes()` single-batch / no chunking** → Phase 3 (production log ergonomics).
+- **`onBatch` fires synchronously; a throwing subscriber breaks `apply`** → contract note:
+  subscription handlers must not throw; no code change needed.
+- **`InProcessTransport` connect/disconnect lifecycle untested** → Phase 3 (real transport
+  work; `_setConnected` fires handlers but the T3 reconnect fork is not exercised).
+- **Op-with-version conflict path untested** → Phase 2 (`opUnitVersions` tracker exists but
+  no test exercises a version-compare collision on an op change).
 
 ---
 

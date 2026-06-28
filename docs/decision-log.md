@@ -243,3 +243,35 @@ Implemented the real `Feed` + `ScopeRouter` engine and LWW as the first concrete
 - P5: state collision resolved take-by-version; throwing `Resolver` never invoked (T4 LWW path). ✓
 - P6: `concurrent` → `Resolver` path named deferral; branch present in engine. ✓
 - P7: `tsc --noEmit` clean; vitest 18/18. ✓
+
+### 2026-06-27 — Phase 1b review close-out: two convergence tests added; three findings recorded [LOCKED]
+
+**P8 and P9 added to `test/engine/engine.test.ts`.** 21/21 tests passing.
+
+- **P8 — Reconnect replay.** Two sub-tests verify `changes(scope, since)` as the fault-recovery
+  primitive: (a) full replay — B misses all of A's writes, requests `changes(scope, cursorAt0)`,
+  applies the yielded batch, snapshot matches and cursor advances; T3 sanity check confirms no
+  ephemeral ids appear in replay. (b) Partial replay — B already holds entries 1–2, requests
+  only since cursor-at-2, receives exactly 2 entries, durable log size = 4 not 6.
+- **P9 — 3-replica contention under partition.** Three replicas write the same unit; initial
+  drain converges on v3. Replica 2 is then isolated; isolated replica writes v_island (_ts=4),
+  replicas 0 and 1 write v_winner (_ts=5) and gossip between themselves. Reconnect + drain:
+  all 3 converge on v_winner. Verifies that the globally-highest version wins across a
+  partition boundary.
+
+**Three findings recorded (no code change — engine logic unchanged):**
+
+1. **`concurrent` arm silently drops the incoming change [HIGH].** `_applyState` / `_applyOp`
+   call `_seenIds.add` then `return false` on `cmp === "concurrent"`. The comment says "hold
+   both, do not silently decide" but the code holds neither — the incoming change is lost and
+   its id is permanently marked seen. Inert under LWW (unreachable); live T4 violation the
+   moment a Phase 2 strategy returns `concurrent`. **Phase 2 must fix this before testing any
+   `concurrent`-producing strategy.** Trust the code, not the comment.
+
+2. **`_seenIds` grows unbounded [MED].** No eviction. Correct for in-memory Phase 1b; Phase 3
+   (persistence) needs compaction.
+
+3. **`Resolver` / `onConflict` are dead under all current paths [MED].** The only call site is
+   the `concurrent` arm, which returns before it. P5's "throwing Resolver never invoked" passes
+   trivially — the Resolver is never invoked under *any* current path, not just the LWW path.
+   Phase 2 must activate this wiring; P5 proves less than its name suggests.

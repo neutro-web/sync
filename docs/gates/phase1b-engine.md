@@ -110,6 +110,49 @@ engine inspected the versions and incorrectly routed to the Resolver when a
 
 ---
 
+### P8 — Reconnect replay: missed changes recovered via `changes(since)`
+
+**Artifact / command**: `pnpm test` → `engine.test.ts` → "P8 · Reconnect replay"
+
+**Replica count**: 2
+
+**Divergence driver**: Replica A applies three durable state changes while B receives none
+(partition simulated by not gossiping). B's cursor is at seq 0 when A's is at seq 3.
+
+**Reconciled assertion**: After B calls `engineA.changes(scope, cursorB)` and applies the
+yielded batch, B's `snapshot()` matches A's for every unit. B's cursor advances to A's
+terminal seq. B's own `changes(scope, null)` yields exactly the three durable ids; no
+ephemeral ids appear (T3 sanity check). A second sub-test (partial replay) verifies that
+`changes(scope, cursorAt2)` yields only the two entries B missed, not the two it already
+held — total durable log size on B is 4, not 6.
+
+**Failure condition**: Any unit missing from B's snapshot post-replay; B's cursor not
+advanced to A's seq; any ephemeral id appearing in `changes()` output; or the partial-replay
+sub-test producing more or fewer entries than expected.
+
+---
+
+### P9 — 3-replica contention under partition
+
+**Artifact / command**: `pnpm test` → `engine.test.ts` → "P9 · 3-replica contention under partition"
+
+**Replica count**: 3
+
+**Divergence driver**: All 3 replicas write the same unit concurrently (distinct versions).
+After initial convergence on the highest version (v3, _ts=3), replica 2 is isolated. The
+isolated replica writes a competing version (v_island, _ts=4). Replicas 0 and 1 write a
+higher version (v_winner, _ts=5) and gossip it between themselves. Replica 2 is then
+reconnected; all buffered gossip drains to quiescence.
+
+**Asserted end-state**: After drain, all 3 replicas hold `val-winner` (_ts=5). The
+island-only write (v_island, _ts=4) is evicted everywhere when the globally-higher version
+arrives. No replica holds `val-island` or `val-v3` after reconnect.
+
+**Failure condition**: Any replica holds any value other than `val-winner` after final drain;
+any two replicas disagree; a non-maximal version survives reconnect.
+
+---
+
 ### P6 — DEFERRED (named): `concurrent` → Resolver path
 
 **Status**: Explicitly not tested in Phase 1b. LWW `compare()` never returns `concurrent`,
@@ -150,3 +193,5 @@ strict failure — types are the primary expression of the seam contract.
 | P5 | 2 | same-unit state collision, throwing Resolver | V_high wins; Resolver never called |
 | P6 | — | — | named deferral recorded; branch exists in engine |
 | P7 | — | — | `tsc --noEmit` exits 0; `vitest` exits 0 |
+| P8 | 2 | partition (B misses all writes); `changes(since)` replay | B snapshot = A; cursor advanced; replay excludes ephemeral |
+| P9 | 3 | same-unit contention + mid-contention partition | all 3 converge on globally-highest version post-reconnect |
