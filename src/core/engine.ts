@@ -54,6 +54,8 @@ import {
   type Change,
   type StateChange,
   type OpChange,
+  type VersionedChange,
+  type ConflictUnit,
   type Version,
   type ChangeBatch,
   type Snapshot,
@@ -109,6 +111,14 @@ interface ScopeState {
    * scopes is accepted independently on each scope.
    */
   seenIds: Set<string>;
+  /**
+   * Open conflicts: units with concurrent competing versions held until resolved.
+   * Last-confirmed-winner semantics: the confirmed maps (durableStateUnits /
+   * ephemeralStateUnits) are unchanged while a conflict is open. The incoming
+   * concurrent change is stored here, not in the confirmed maps, until
+   * resolveConflict() lands a winner.
+   */
+  openConflicts: Map<string, { local: VersionedChange; remote: VersionedChange }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -178,8 +188,24 @@ export class Engine implements Feed, ScopeRouter {
         return false;
       }
       if (cmp === "concurrent") {
-        // T4 deferred path. Under LWW this is unreachable.
-        // Do NOT add to seenIds — the id stays open for Phase 2 re-routing.
+        // Model C — detect-and-hold. Record both competing sides; fire onConflict
+        // as a notification; return synchronously. apply() does NOT own the
+        // resolution lifecycle. The id stays open (not added to seenIds) so
+        // resolveConflict() can re-land the winner without being blocked by dedup.
+        const conflict: Conflict = {
+          unit: change.unit,
+          scope: change.scope,
+          local: currentWinner.change as VersionedChange,
+          remote: change as VersionedChange,
+        };
+        scope.openConflicts.set(change.unit.key, {
+          local: currentWinner.change as VersionedChange,
+          remote: change as VersionedChange,
+        });
+        for (const handlers of scope.subs) {
+          // Notification only — return value intentionally ignored (Model C).
+          handlers.onConflict(conflict);
+        }
         return false;
       }
       // cmp === "after": incoming is newer, proceed.
@@ -330,6 +356,69 @@ export class Engine implements Feed, ScopeRouter {
     return makeCursor(scope, scopeState?.cursorSeq ?? 0);
   }
 
+  /**
+   * Apply a Resolution to an open conflict on a unit. Engine-internal seam —
+   * not part of the Feed or ScopeRouter interfaces; not the G2 consumer API.
+   *
+   * - `take-local`: local is already confirmed; marks both ids seen so gossip
+   *   redelivery cannot re-open the conflict. No state change, no onBatch.
+   * - `take-remote`: lands the remote change directly into the confirmed maps,
+   *   advances cursor (if durable), fires onBatch.
+   * - `merged`: NOT supported in Phase 2. Throws explicitly.
+   * - `defer`: no-op — conflict stays open.
+   *
+   * Calling resolveConflict on a unit with no open conflict is a no-op.
+   */
+  resolveConflict(scope: Scope, unit: ConflictUnit, resolution: Resolution): void {
+    const scopeState = this._scopes.get(scope.key);
+    if (!scopeState) return;
+    const open = scopeState.openConflicts.get(unit.key);
+    if (!open) return;
+
+    if (resolution.decision === "defer") return; // conflict stays open
+
+    if (resolution.decision === "merged") {
+      throw new Error(
+        "resolveConflict: 'merged' is not supported in Phase 2. " +
+          "Use take-local, take-remote, or defer.",
+      );
+    }
+
+    scopeState.openConflicts.delete(unit.key);
+
+    // Prevent gossip redelivery from re-opening this conflict.
+    scopeState.seenIds.add(open.local.id.value);
+    scopeState.seenIds.add(open.remote.id.value);
+
+    if (resolution.decision === "take-local") {
+      // Local is already in the confirmed maps (last-confirmed-winner held it).
+      return;
+    }
+
+    // take-remote: land the remote change directly into the confirmed maps.
+    const winnerChange = open.remote as StateChange;
+
+    if (winnerChange.lifetime.class === "durable") {
+      scopeState.durableStateUnits.set(unit.key, { change: winnerChange });
+      scopeState.cursorSeq++;
+      scopeState.durableLog.push({ change: winnerChange, seq: scopeState.cursorSeq });
+    } else {
+      scopeState.ephemeralStateUnits.set(unit.key, { change: winnerChange });
+    }
+
+    // Notify subscriptions so gossip wiring propagates the winning value.
+    const outBatch: ChangeBatch = {
+      scope,
+      changes: [winnerChange],
+      ...(winnerChange.lifetime.class === "durable"
+        ? { cursor: makeCursor(scope, scopeState.cursorSeq) }
+        : {}),
+    };
+    for (const handlers of scopeState.subs) {
+      handlers.onBatch(outBatch);
+    }
+  }
+
   // ---- Private ------------------------------------------------------------
 
   private _getOrCreateScope(scope: Scope): ScopeState {
@@ -343,6 +432,7 @@ export class Engine implements Feed, ScopeRouter {
         cursorSeq: 0,
         subs: new Set(),
         seenIds: new Set(),
+        openConflicts: new Map(),
       });
     }
     return this._scopes.get(key)!;

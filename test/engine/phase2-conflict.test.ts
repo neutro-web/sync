@@ -172,3 +172,132 @@ describe("Q1 · VectorClock: causally-independent versions compare as concurrent
     expect(clockA.compare(vC, vB)).toBe("after");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Q2 — Model C: conflict detected and held; apply() stays synchronous
+// ---------------------------------------------------------------------------
+
+describe("Q2 · Model C: concurrent conflict detected, held, apply() synchronous", () => {
+  it("concurrent writes open a conflict; apply() returns synchronously; cursor does not advance", async () => {
+    const clockA = new VectorClockStrategy("A");
+    const clockB = new VectorClockStrategy("B");
+    const scope = makeScope("q2-doc");
+    const engine = new Engine(new VectorClockStrategy("engine"));
+
+    // Land confirmed state via A's version.
+    const vA = clockA.mint();
+    await engine.apply(makeStateBatch(scope, "u1", "val-A", "id-A", vA));
+    const cursorAfterFirst = engine.getCursor(scope);
+    expect(cursorAfterFirst._seq).toBe(1);
+
+    // Apply causally-independent version from B — must be concurrent.
+    const vB = clockB.mint(); // no knowledge of vA → concurrent
+
+    let conflictFired = false;
+    engine.subscribe(scope, {
+      onBatch: () => {},
+      onConflict: () => {
+        conflictFired = true;
+        return { decision: "defer" };
+      },
+    });
+
+    // apply() fires onConflict synchronously during the call — no microtask needed.
+    // If conflictFired is true BEFORE await, the notification happened inline.
+    const p = engine.apply(makeStateBatch(scope, "u1", "val-B", "id-B", vB));
+    expect(conflictFired).toBe(true); // fires synchronously inside apply(), before any yield
+    await p;
+    // Cursor must NOT have advanced — concurrent change does not confirm.
+    expect(engine.getCursor(scope)._seq).toBe(1);
+  });
+
+  it("snapshot() shows last-confirmed value immediately after conflict detection", async () => {
+    const clockA = new VectorClockStrategy("A");
+    const clockB = new VectorClockStrategy("B");
+    const scope = makeScope("q2-snap");
+    const engine = new Engine(new VectorClockStrategy("engine"));
+
+    const vA = clockA.mint();
+    await engine.apply(makeStateBatch(scope, "u1", "confirmed-val", "id-A", vA));
+
+    const vB = clockB.mint();
+    await engine.apply(makeStateBatch(scope, "u1", "concurrent-val", "id-B", vB));
+
+    const state = await getState(engine, scope);
+    // last-confirmed-winner: concurrent incoming must NOT overwrite confirmed state.
+    expect(state.get("u1")).toBe("confirmed-val");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Q5 — defer leaves conflict open
+// ---------------------------------------------------------------------------
+
+describe("Q5 · defer: conflict stays open, state unchanged, subsequent resolution lands", () => {
+  it("resolver returning defer keeps last-confirmed; subsequent take-remote lands correctly", async () => {
+    const clockA = new VectorClockStrategy("A");
+    const clockB = new VectorClockStrategy("B");
+    const scope = makeScope("q5-doc");
+    const unit = makeConflictUnit("u1");
+    const engine = new Engine(new VectorClockStrategy("engine"));
+
+    const vA = clockA.mint();
+    await engine.apply(makeStateBatch(scope, "u1", "confirmed-val", "id-A", vA));
+
+    const vB = clockB.mint();
+    await engine.apply(makeStateBatch(scope, "u1", "concurrent-val", "id-B", vB));
+
+    // Confirmed state unchanged after conflict detected.
+    expect((await getState(engine, scope)).get("u1")).toBe("confirmed-val");
+
+    // Call resolveConflict with defer — must leave conflict open.
+    engine.resolveConflict(scope, unit, { decision: "defer" });
+    expect((await getState(engine, scope)).get("u1")).toBe("confirmed-val");
+
+    // Resolve with take-remote — concurrent-val should now land.
+    engine.resolveConflict(scope, unit, { decision: "take-remote" });
+    expect((await getState(engine, scope)).get("u1")).toBe("concurrent-val");
+  });
+
+  it("resolveConflict on a unit with no open conflict is a no-op and does not throw", () => {
+    const engine = new Engine(new VectorClockStrategy("engine"));
+    expect(() =>
+      engine.resolveConflict(
+        makeScope("no-conflict"),
+        makeConflictUnit("u1"),
+        { decision: "take-local" },
+      ),
+    ).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Q6 — last-confirmed-winner reads during open conflict
+// ---------------------------------------------------------------------------
+
+describe("Q6 · last-confirmed-winner reads during open conflict", () => {
+  it("snapshot() returns confirmed value; changes() excludes concurrent incoming", async () => {
+    const clockA = new VectorClockStrategy("A");
+    const clockB = new VectorClockStrategy("B");
+    const scope = makeScope("q6-doc");
+    const engine = new Engine(new VectorClockStrategy("engine"));
+
+    const vA = clockA.mint();
+    await engine.apply(makeStateBatch(scope, "u1", "confirmed-val", "id-A", vA));
+
+    const vB = clockB.mint();
+    await engine.apply(makeStateBatch(scope, "u1", "concurrent-val", "id-B", vB));
+
+    // snapshot: confirmed only.
+    const state = await getState(engine, scope);
+    expect(state.get("u1")).toBe("confirmed-val");
+
+    // changes(): concurrent incoming must not appear in the durable log.
+    const logIds = new Set<string>();
+    for await (const batch of engine.changes(scope, null)) {
+      for (const c of batch.changes) logIds.add(c.id.value);
+    }
+    expect(logIds.has("id-A")).toBe(true);  // confirmed change is in log
+    expect(logIds.has("id-B")).toBe(false); // concurrent incoming is NOT in log
+  });
+});
