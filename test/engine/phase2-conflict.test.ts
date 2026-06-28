@@ -272,6 +272,44 @@ describe("Q5 · defer: conflict stays open, state unchanged, subsequent resoluti
 });
 
 // ---------------------------------------------------------------------------
+// Q3 — Resolver wiring is live (closes Phase 1b Finding #3)
+// ---------------------------------------------------------------------------
+
+describe("Q3 · ResolverPump: resolver IS invoked on a concurrent conflict", () => {
+  it("recording resolver is called exactly once with the correct conflict payload", async () => {
+    const clockA = new VectorClockStrategy("A");
+    const clockB = new VectorClockStrategy("B");
+    const scope = makeScope("q3-doc");
+    const unit = makeConflictUnit("u1");
+
+    const capturedConflicts: Conflict[] = [];
+    const recordingResolver: Resolver = {
+      resolve(conflict: Conflict): Resolution {
+        capturedConflicts.push(conflict);
+        return { decision: "take-local" };
+      },
+    };
+
+    const engine = new Engine(new VectorClockStrategy("engine"));
+    new ResolverPump(engine, recordingResolver, scope);
+
+    const vA = clockA.mint();
+    await engine.apply(makeStateBatch(scope, "u1", "val-A", "id-A", vA));
+
+    const vB = clockB.mint(); // concurrent — no knowledge of vA
+    await engine.apply(makeStateBatch(scope, "u1", "val-B", "id-B", vB));
+
+    // Resolver must have been called exactly once.
+    expect(capturedConflicts).toHaveLength(1);
+    expect(capturedConflicts[0]!.unit.key).toBe(unit.key);
+    expect(capturedConflicts[0]!.scope.key).toBe(scope.key);
+    // local = confirmed state (val-A); remote = incoming concurrent (val-B)
+    expect(capturedConflicts[0]!.local.value).toBe("val-A");
+    expect(capturedConflicts[0]!.remote.value).toBe("val-B");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Q6 — last-confirmed-winner reads during open conflict
 // ---------------------------------------------------------------------------
 
