@@ -339,3 +339,103 @@ describe("Q6 · last-confirmed-winner reads during open conflict", () => {
     expect(logIds.has("id-B")).toBe(false); // concurrent incoming is NOT in log
   });
 });
+
+// ---------------------------------------------------------------------------
+// Q4 — Resolution converges on ≥2 replicas (headline gate)
+// ---------------------------------------------------------------------------
+
+describe("Q4 · Convergence: deterministic resolver produces same result on both replicas", () => {
+  it("two replicas independently resolve the same conflict to the same value under fault injection", async () => {
+    // Convergence mechanism: approach (a) — deterministic pure function of the
+    // conflict. Picks the change with the lexicographically-larger id.value.
+    // Symmetric: same winner regardless of which side is "local" vs "remote".
+    const deterministicResolver: Resolver = {
+      resolve(conflict: Conflict): Resolution {
+        return conflict.local.id.value > conflict.remote.id.value
+          ? { decision: "take-local" }
+          : { decision: "take-remote" };
+      },
+    };
+
+    const clockA = new VectorClockStrategy("A");
+    const clockB = new VectorClockStrategy("B");
+    const scope = makeScope("q4-doc");
+
+    // Two engines; each uses its own VectorClockStrategy so their minted versions
+    // have no causal relationship (concurrent by construction).
+    const engineA = new Engine(new VectorClockStrategy("engine-A"));
+    const engineB = new Engine(new VectorClockStrategy("engine-B"));
+
+    // Attach ResolverPumps BEFORE applying local writes so they are subscribed
+    // when onConflict fires.
+    new ResolverPump(engineA, deterministicResolver, scope);
+    new ResolverPump(engineB, deterministicResolver, scope);
+
+    // Wire gossip (with fault injection).
+    const { allChannels, throwIfErrors } = setupGossip(
+      [engineA, engineB],
+      scope,
+      400,
+      { dropRate: 0.2, reorderRate: 0.2, duplicateRate: 0.1 },
+    );
+
+    // Both replicas write to the same unit WITHOUT exchanging first.
+    // "id-A" < "id-B" lexicographically → B's value is the expected winner.
+    const vA = clockA.mint();
+    const vB = clockB.mint(); // no knowledge of vA → concurrent
+    await engineA.apply(makeStateBatch(scope, "u1", "val-A", "id-A", vA));
+    await engineB.apply(makeStateBatch(scope, "u1", "val-B", "id-B", vB));
+
+    await drainChannels(allChannels);
+    throwIfErrors();
+
+    const stateA = await getState(engineA, scope);
+    const stateB = await getState(engineB, scope);
+
+    // Both replicas must agree — the deterministic resolver picked the same winner.
+    expect(stateA.get("u1")).toBe(stateB.get("u1"));
+    // "id-B" > "id-A" → "val-B" is the winner on both replicas.
+    expect(stateA.get("u1")).toBe("val-B");
+  });
+
+  it("convergence holds across multiple units with independent concurrent conflicts", async () => {
+    const deterministicResolver: Resolver = {
+      resolve(conflict: Conflict): Resolution {
+        return conflict.local.id.value > conflict.remote.id.value
+          ? { decision: "take-local" }
+          : { decision: "take-remote" };
+      },
+    };
+
+    const clockA = new VectorClockStrategy("A");
+    const clockB = new VectorClockStrategy("B");
+    const scope = makeScope("q4-multi");
+
+    const engineA = new Engine(new VectorClockStrategy("engine-A"));
+    const engineB = new Engine(new VectorClockStrategy("engine-B"));
+
+    new ResolverPump(engineA, deterministicResolver, scope);
+    new ResolverPump(engineB, deterministicResolver, scope);
+
+    const { allChannels, throwIfErrors } = setupGossip([engineA, engineB], scope, 410);
+
+    // Concurrent writes to two different units.
+    // u1: "id-u1-A" < "id-u1-B" → val-B wins
+    // u2: "id-u2-A" < "id-u2-B" → val-B wins
+    await engineA.apply(makeStateBatch(scope, "u1", "u1-val-A", "id-u1-A", clockA.mint()));
+    await engineA.apply(makeStateBatch(scope, "u2", "u2-val-A", "id-u2-A", clockA.mint()));
+    await engineB.apply(makeStateBatch(scope, "u1", "u1-val-B", "id-u1-B", clockB.mint()));
+    await engineB.apply(makeStateBatch(scope, "u2", "u2-val-B", "id-u2-B", clockB.mint()));
+
+    await drainChannels(allChannels);
+    throwIfErrors();
+
+    const stateA = await getState(engineA, scope);
+    const stateB = await getState(engineB, scope);
+
+    expect(stateA.get("u1")).toBe(stateB.get("u1"));
+    expect(stateA.get("u2")).toBe(stateB.get("u2"));
+    expect(stateA.get("u1")).toBe("u1-val-B");
+    expect(stateA.get("u2")).toBe("u2-val-B");
+  });
+});
