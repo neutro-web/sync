@@ -18,12 +18,28 @@
 import type { Resolver, Scope, Conflict, Resolution } from "./types.ts";
 import type { Engine } from "./engine.ts";
 
+/**
+ * Bridges engine conflict notifications to a {@link Resolver}.
+ *
+ * Subscribes to the engine on construction. **Call {@link dispose} when done**
+ * to unsubscribe; a discarded `ResolverPump` without `dispose()` holds its
+ * subscription for the engine's lifetime (intentional in the in-memory sandbox,
+ * but worth noting for future persistence layers).
+ *
+ * Sync resolvers: `resolve()` is called synchronously inside the engine's
+ * `onConflict` notification loop. `resolveConflict()` fires reentrantly.
+ *
+ * Async resolvers: `onConflict` returns `{ decision: "defer" }` synchronously;
+ * the promise settles and calls `resolveConflict` later.
+ */
 export class ResolverPump {
   private readonly _sub: { unsubscribe(): void };
 
   constructor(engine: Engine, resolver: Resolver, scope: Scope) {
     this._sub = engine.subscribe(scope, {
       onBatch: () => {},
+      // NOTE: for sync resolvers, this handler calls resolveConflict reentrantly
+      // from inside the engine's onConflict notification loop.
       onConflict: (conflict: Conflict): Resolution => {
         const result = resolver.resolve(conflict);
         if (result instanceof Promise) {

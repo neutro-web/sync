@@ -32,7 +32,7 @@ _Last updated: 2026-06-28. Seam Contract **v1.0** (frozen)._ Phase 2 complete.
   and §9.1 local-derived-state rule in place. This is the founding semantics.
 - **Governance scaffold:** Complete. Charter, custom instructions, AGENTS.md, decision log,
   implementation-state all in place.
-- **Code:** Phase 2 complete. `VectorClockStrategy` + Model C engine (`openConflicts`, `resolveConflict`) + `ResolverPump`. 36 tests passing. `tsc --noEmit` clean. T4 concurrent path activated and proven on ≥2 replicas.
+- **Code:** Phase 2 complete + audit fixed. `VectorClockStrategy` + Model C engine (`openConflicts`, `resolveConflict`) + `ResolverPump`. 40 tests passing. `tsc --noEmit` clean. T4 concurrent path activated and proven on ≥2 replicas.
 
 ### Locked (do not drift without an explicit superseding entry)
 - **Standalone** — `ns` has no dependency on any neutro sibling. No `neutro/*` runtime import

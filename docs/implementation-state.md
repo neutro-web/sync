@@ -26,7 +26,7 @@ returns synchronously — `apply()` never awaits resolution. `resolveConflict(sc
 lands a resolution directly into the confirmed maps. `ResolverPump` bridges `onConflict` →
 `resolver.resolve` → `resolveConflict` as an optional layer. Convergence proven on 2 replicas
 under fault injection using approach (a): deterministic pure-function resolver (pick-by-id).
-Q1–Q7 gate passing; 36 tests total; `tsc --noEmit` clean.
+Q1–Q7 gate passing; 40 tests total (36 + 4 audit fixes); `tsc --noEmit` clean.
 
 ---
 
@@ -112,12 +112,13 @@ not built · **—** = not created.
 
 **`Engine.apply(batch: ChangeBatch): Promise<void>`**
 Branches on `change.kind`. State: per-scope seenIds dedup, then `ClockStrategy.compare(incoming,
-currentWinner)` — `"after"` accepts, `"before"` skips, `"concurrent"` deferred without marking
-id seen (open for Phase 2 re-routing). Op (no version): seenIds dedup only. Op (with version):
-seenIds dedup, then version compare (same deferred semantics on `"concurrent"`). T3 fork: durable
-→ advance `cursorSeq` + append to `durableLog`; ephemeral → update `ephemeralStateUnits` only.
-Fires subscriptions synchronously for accepted changes (required for drain-round correctness).
-Returns `Promise.resolve()` — synchronous internally.
+currentWinner)` — `"after"` accepts, `"before"` skips, `"concurrent"` → Model C detect-and-hold
+(records open conflict in `openConflicts`, fires `onConflict` notification, returns without adding
+id to seenIds). Op (no version): seenIds dedup only. Op (with version): seenIds dedup, then
+version compare (`"concurrent"` arm still deferred for ops — needs full VersionedChange per unit).
+T3 fork: durable → advance `cursorSeq` + append to `durableLog`; ephemeral → update
+`ephemeralStateUnits` only. Fires subscriptions synchronously for accepted changes (required for
+drain-round correctness). Returns `Promise.resolve()` — synchronous internally.
 
 **`Engine.changes(scope, since: Cursor | null): AsyncIterable<ChangeBatch>`**
 Yields durable log entries with `seq > since._seq` (or all if `since` is null) as a single
@@ -131,8 +132,8 @@ the durable log. Durable base is preserved in `durableStateUnits` even when ephe
 
 **`Engine.subscribe(scope, { onBatch, onConflict }): Subscription`**
 Registers per-scope handlers. `onBatch` fires synchronously in `apply()` for each accepted
-batch. `onConflict` is wired but not yet invoked (awaits Phase 2 `concurrent` path).
-`unsubscribe()` is idempotent.
+batch. `onConflict` is live as of Phase 2: fires synchronously in the `concurrent` arm of
+`_applyState` as a notification (return value ignored — Model C). `unsubscribe()` is idempotent.
 
 **`Engine.getCursor(scope): Cursor`**
 Returns `makeCursor(scope, cursorSeq)`. Not on the `Feed` interface — test assertion helper only.

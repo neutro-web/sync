@@ -27,10 +27,12 @@
  * ephemeral changes do neither.
  *
  * ## T4 — Detect, never decide
- * The `concurrent` arm returns false WITHOUT adding to seenIds, leaving the
- * incoming change id open for Phase 2 re-routing. Under LWW, `compare()` never
- * returns `"concurrent"`, so this path is unreachable in Phase 1b. The branch
- * exists and is documented as an honest deferred arm, not a throw.
+ * The `concurrent` arm in `_applyState` is live as of Phase 2 (Model C). When two
+ * causally-independent state changes target the same unit, the engine records the
+ * conflict in `openConflicts`, fires `onConflict` as a notification (return value
+ * ignored), and returns `false` WITHOUT adding either id to `seenIds`. Resolution
+ * is driven by `resolveConflict()` or via `ResolverPump`. The `_applyOp` concurrent
+ * arm remains deferred.
  *
  * ## T5 — Per-scope causal order
  * Subscriptions fire per scope in the order changes were accepted. No cross-scope
@@ -204,7 +206,11 @@ export class Engine implements Feed, ScopeRouter {
         });
         for (const handlers of scope.subs) {
           // Notification only — return value intentionally ignored (Model C).
-          handlers.onConflict(conflict);
+          try {
+            handlers.onConflict(conflict);
+          } catch (err) {
+            console.error("[Engine] onConflict handler threw; conflict held open:", err);
+          }
         }
         return false;
       }
@@ -368,6 +374,16 @@ export class Engine implements Feed, ScopeRouter {
    * - `defer`: no-op — conflict stays open.
    *
    * Calling resolveConflict on a unit with no open conflict is a no-op.
+   *
+   * **Redelivery note:** Until resolved, the remote change id is NOT in seenIds —
+   * re-applying the same concurrent remote re-opens/overwrites the conflict entry
+   * and re-fires onConflict. Deterministic resolvers are idempotent; stateful
+   * resolvers may fire twice.
+   *
+   * **Reentrancy note (sync resolvers):** A synchronous ResolverPump calls
+   * resolveConflict (and onBatch) from within the onConflict notification loop.
+   * Safe for the current Set-based iteration; do not mutate the subscription set
+   * from inside a handler.
    */
   resolveConflict(scope: Scope, unit: ConflictUnit, resolution: Resolution): void {
     const scopeState = this._scopes.get(scope.key);

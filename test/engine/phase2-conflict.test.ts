@@ -269,6 +269,67 @@ describe("Q5 · defer: conflict stays open, state unchanged, subsequent resoluti
       ),
     ).not.toThrow();
   });
+
+  it("resolveConflict with decision 'merged' throws before any state mutation", async () => {
+    const clockA = new VectorClockStrategy("A");
+    const clockB = new VectorClockStrategy("B");
+    const engine = new Engine(clockA);
+    const scope = makeScope("merged-throw");
+    const vA = clockA.mint();
+    const vB = clockB.mint();
+    engine.subscribe(scope, { onBatch: () => {}, onConflict: () => ({ decision: "defer" }) });
+    await engine.apply(makeStateBatch(scope, "u1", "val-A", "id-A", vA));
+    await engine.apply(makeStateBatch(scope, "u1", "val-B", "id-B", vB));
+    expect(() =>
+      engine.resolveConflict(scope, makeConflictUnit("u1"), { decision: "merged" } as any)
+    ).toThrow("resolveConflict: 'merged' is not supported in Phase 2");
+  });
+
+  it("take-remote resolves an ephemeral conflict and does not advance the cursor", async () => {
+    const clockA = new VectorClockStrategy("A");
+    const clockB = new VectorClockStrategy("B");
+    const engine = new Engine(clockA);
+    const scope = makeScope("ephemeral-conflict");
+    const vA = clockA.mint();
+    const vB = clockB.mint();
+    engine.subscribe(scope, { onBatch: () => {}, onConflict: () => ({ decision: "defer" }) });
+    await engine.apply({
+      scope,
+      changes: [{
+        id: makeChangeId("id-A"), kind: "state", scope, unit: makeConflictUnit("u1"),
+        value: "val-A", version: vA, lifetime: { class: "ephemeral" },
+      } as any],
+    });
+    await engine.apply({
+      scope,
+      changes: [{
+        id: makeChangeId("id-B"), kind: "state", scope, unit: makeConflictUnit("u1"),
+        value: "val-B", version: vB, lifetime: { class: "ephemeral" },
+      } as any],
+    });
+    engine.resolveConflict(scope, makeConflictUnit("u1"), { decision: "take-remote" });
+    const snap = await engine.snapshot(scope);
+    expect(snap.changes.find((c) => c.unit.key === "u1")?.value).toBe("val-B");
+    expect(engine.getCursor(scope)._seq).toBe(0);
+  });
+
+  it("calling resolveConflict twice for the same unit is a no-op on the second call", async () => {
+    const clockA = new VectorClockStrategy("A");
+    const clockB = new VectorClockStrategy("B");
+    const engine = new Engine(clockA);
+    const scope = makeScope("double-resolve");
+    const vA = clockA.mint();
+    const vB = clockB.mint();
+    engine.subscribe(scope, { onBatch: () => {}, onConflict: () => ({ decision: "defer" }) });
+    await engine.apply(makeStateBatch(scope, "u1", "val-A", "id-A", vA));
+    await engine.apply(makeStateBatch(scope, "u1", "val-B", "id-B", vB));
+    engine.resolveConflict(scope, makeConflictUnit("u1"), { decision: "take-remote" });
+    expect(() =>
+      engine.resolveConflict(scope, makeConflictUnit("u1"), { decision: "take-local" })
+    ).not.toThrow();
+    const snap = await engine.snapshot(scope);
+    expect(snap.changes.find((c) => c.unit.key === "u1")?.value).toBe("val-B");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -306,6 +367,32 @@ describe("Q3 · ResolverPump: resolver IS invoked on a concurrent conflict", () 
     // local = confirmed state (val-A); remote = incoming concurrent (val-B)
     expect(capturedConflicts[0]!.local.value).toBe("val-A");
     expect(capturedConflicts[0]!.remote.value).toBe("val-B");
+  });
+
+  it("async resolver rejection logs error and leaves conflict open", async () => {
+    const clockA = new VectorClockStrategy("A");
+    const clockB = new VectorClockStrategy("B");
+    const engine = new Engine(clockA);
+    const scope = makeScope("async-reject");
+    const vA = clockA.mint();
+    const vB = clockB.mint();
+    engine.subscribe(scope, { onBatch: () => {}, onConflict: () => ({ decision: "defer" }) });
+    const rejectingResolver: Resolver = {
+      resolve: () => Promise.reject(new Error("async resolver boom")),
+    };
+    const pump = new ResolverPump(engine, rejectingResolver, scope);
+    const errors: unknown[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args);
+    await engine.apply(makeStateBatch(scope, "u1", "val-A", "id-A", vA));
+    await engine.apply(makeStateBatch(scope, "u1", "val-B", "id-B", vB));
+    await new Promise((r) => setTimeout(r, 0));
+    console.error = origError;
+    expect(errors.length).toBeGreaterThan(0);
+    expect(String(errors[0])).toContain("[ResolverPump] async resolution failed");
+    const snap = await engine.snapshot(scope);
+    expect(snap.changes.find((c) => c.unit.key === "u1")?.value).toBe("val-A");
+    pump.dispose();
   });
 });
 
