@@ -1,15 +1,26 @@
 /**
  * Last-Writer-Wins ClockStrategy.
  *
- * Versions are monotonic integers minted by a per-instance counter.
- * `compare()` returns `"before"` or `"after"`; it **never** returns `"concurrent"` —
- * that is LWW's defining property. The `concurrent` arm in `Engine.apply()` is
- * unreachable under this strategy. Phase 2 (logical clock, CRDT position) introduces
- * strategies where `concurrent` is the common case.
+ * Versions carry two fields: `_ts` (a Lamport-style monotonic counter) and
+ * `_node` (a per-instance identifier used as a deterministic tiebreaker).
+ * Together they produce a strict total order with no `"concurrent"` return —
+ * LWW's defining property.
  *
- * Internal version shape: `{ _ts: number }`. The `_ts` field is a monotonically
- * increasing integer (not a wall-clock timestamp) to ensure fully deterministic
- * behaviour in tests. Strategy-owned and opaque to `ns` — only this file reads inside.
+ * ## Tiebreaking across independent instances
+ * Two separate `LWWClockStrategy` instances can independently mint the same
+ * `_ts` (e.g., both start at 0 and each calls `mint()` once without `prev`).
+ * The `_node` ID — assigned from a module-level counter at construction time,
+ * or supplied explicitly — breaks ties deterministically: the higher `_node`
+ * wins. An identical `(_ts, _node)` pair is idempotent (treated as `"before"`).
+ *
+ * ## Lamport clock advance
+ * `mint(prev?)` advances the counter past any previously-seen version:
+ * `_counter = max(_counter, prev._ts) + 1`. Consumers who pass their last
+ * received version as `prev` produce a version strictly newer than it,
+ * minimising `_ts` collisions in a gossip topology.
+ *
+ * Internal version shape: `{ _ts: number, _node: number }`. Strategy-owned
+ * and opaque to `ns` — only this file reads inside.
  */
 
 import type { ClockStrategy, Version } from "../core/types.ts";
@@ -20,11 +31,15 @@ import type { ClockStrategy, Version } from "../core/types.ts";
 
 interface LWWVersionInternals {
   readonly _ts: number;
+  readonly _node: number;
 }
 
-function getTs(v: Version): number {
-  return (v as unknown as LWWVersionInternals)._ts;
+function asLWW(v: Version): LWWVersionInternals {
+  return v as unknown as LWWVersionInternals;
 }
+
+// Module-level counter — each LWWClockStrategy instance gets a unique node id.
+let _instanceCounter = 0;
 
 // ---------------------------------------------------------------------------
 // LWWClockStrategy
@@ -32,27 +47,40 @@ function getTs(v: Version): number {
 
 export class LWWClockStrategy implements ClockStrategy {
   private _counter = 0;
+  private readonly _node: number;
 
   /**
-   * Mint a new version token. Each call increments the counter, so versions
-   * from the same instance are strictly ordered (later mint > earlier mint).
-   * `prev` is accepted per the interface but not used — LWW has no ancestry.
+   * @param nodeId Optional explicit node identifier. When omitted, a unique id
+   * is auto-assigned from a module-level counter. Pass an explicit value in
+   * tests that require deterministic tiebreaking order.
    */
-  mint(_prev?: Version): Version {
-    return { _ts: ++this._counter } as unknown as Version;
+  constructor(nodeId?: number) {
+    this._node = nodeId ?? _instanceCounter++;
   }
 
   /**
-   * Compare two versions.
-   * - Returns `"after"` if `a` is strictly newer than `b`.
-   * - Returns `"before"` for all other cases (a is older, or equal).
-   * - **Never returns `"concurrent"`** — equal timestamps are treated as
-   *   `"before"` (re-applying the same version is a no-op; first write wins
-   *   on exact tie, which cannot occur with per-instance monotonic counters).
+   * Mint a new version token. Advances the internal counter past `prev`
+   * (Lamport-style): the result is always strictly newer than `prev`.
+   * Without `prev`, increments the counter from its current position.
+   */
+  mint(prev?: Version): Version {
+    this._counter = Math.max(this._counter, prev ? asLWW(prev)._ts : 0) + 1;
+    return { _ts: this._counter, _node: this._node } as unknown as Version;
+  }
+
+  /**
+   * Compare two versions. Returns `"after"` or `"before"`; **never returns
+   * `"concurrent"`** — that is LWW's defining property.
+   *
+   * Ordering: first by `_ts` (higher wins); on equal `_ts`, by `_node`
+   * (higher wins). An identical `(_ts, _node)` pair is treated as `"before"`
+   * (idempotent re-apply).
    */
   compare(a: Version, b: Version): "before" | "after" | "concurrent" {
-    const at = getTs(a);
-    const bt = getTs(b);
-    return at > bt ? "after" : "before";
+    const av = asLWW(a);
+    const bv = asLWW(b);
+    if (av._ts !== bv._ts) return av._ts > bv._ts ? "after" : "before";
+    if (av._node !== bv._node) return av._node > bv._node ? "after" : "before";
+    return "before"; // identical token — idempotent re-apply
   }
 }

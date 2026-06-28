@@ -40,7 +40,16 @@ import type { FaultConfig } from "../harness/channel-simulator.ts";
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Drain all channels to quiescence (same round-based pattern as ConvergenceHarness). */
+/**
+ * Drain all channels to quiescence (round-based).
+ *
+ * Algorithm mirrors ConvergenceHarness.drainToQuiescence() in
+ * test/harness/convergence-harness.ts. It is co-located here (rather than
+ * imported from harness) because these engine tests wire gossip through the
+ * production ScopeRouter.subscribe() API, not through harness internals — the
+ * two are deliberately kept separate. Any change to the drain algorithm must be
+ * applied in both places.
+ */
 async function drainChannels(
   channels: ChannelSimulator[],
   maxRounds = 100,
@@ -75,14 +84,28 @@ async function getState(
  * Each engine subscribes to `scope`; on `onBatch`, enqueues to channels toward
  * all other engines. Channel keys: "i→j". Seeds: baseSeed + i*100 + j.
  */
+/**
+ * Wire N-replica gossip through directed ChannelSimulators.
+ * Each engine subscribes to `scope`; on `onBatch`, enqueues to channels toward
+ * all other engines. Channel keys: "i→j". Seeds: baseSeed + i*100 + j.
+ *
+ * Returns `throwIfErrors()` — call after drainChannels() to surface any
+ * apply() rejections that occurred during delivery. This replaces the prior
+ * `void engines[j].apply(b)` pattern which silently swallowed rejections.
+ */
 function setupGossip(
   engines: Engine[],
   scope: Scope,
   baseSeed: number,
   faultConfig?: FaultConfig,
-): { channels: Map<string, ChannelSimulator>; allChannels: ChannelSimulator[] } {
+): {
+  channels: Map<string, ChannelSimulator>;
+  allChannels: ChannelSimulator[];
+  throwIfErrors(): void;
+} {
   const n = engines.length;
   const channels = new Map<string, ChannelSimulator>();
+  const deliveryErrors: unknown[] = [];
 
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < n; j++) {
@@ -102,7 +125,7 @@ function setupGossip(
           if (j === capturedI) continue;
           const ch = channels.get(`${capturedI}→${j}`)!;
           ch.enqueue(batch, (b) => {
-            void engines[j]!.apply(b);
+            engines[j]!.apply(b).catch((err) => deliveryErrors.push(err));
           });
         }
       },
@@ -110,7 +133,13 @@ function setupGossip(
     });
   }
 
-  return { channels, allChannels: Array.from(channels.values()) };
+  return {
+    channels,
+    allChannels: Array.from(channels.values()),
+    throwIfErrors(): void {
+      if (deliveryErrors.length > 0) throw deliveryErrors[0];
+    },
+  };
 }
 
 /** Make a durable state ChangeBatch for a single change. */
@@ -171,7 +200,7 @@ describe("P2 · LWW contention: higher version wins everywhere", () => {
     const engine0 = new Engine(new LWWClockStrategy());
     const engine1 = new Engine(new LWWClockStrategy());
 
-    const { allChannels } = setupGossip(
+    const { allChannels, throwIfErrors } = setupGossip(
       [engine0, engine1],
       scope,
       200,
@@ -187,6 +216,7 @@ describe("P2 · LWW contention: higher version wins everywhere", () => {
     await engine1.apply(makeStateBatch(scope, "u1", "from-R1-high", "r1", v_high));
 
     await drainChannels(allChannels);
+    throwIfErrors();
 
     const state0 = await getState(engine0, scope);
     const state1 = await getState(engine1, scope);
@@ -202,7 +232,7 @@ describe("P2 · LWW contention: higher version wins everywhere", () => {
     const engine0 = new Engine(new LWWClockStrategy());
     const engine1 = new Engine(new LWWClockStrategy());
 
-    const { allChannels } = setupGossip([engine0, engine1], scope, 210);
+    const { allChannels, throwIfErrors } = setupGossip([engine0, engine1], scope, 210);
 
     for (let round = 0; round < 3; round++) {
       const v_low  = clock.mint();
@@ -210,6 +240,7 @@ describe("P2 · LWW contention: higher version wins everywhere", () => {
       await engine0.apply(makeStateBatch(scope, "u1", `low-round-${round}`, `r0-${round}`, v_low));
       await engine1.apply(makeStateBatch(scope, "u1", `high-round-${round}`, `r1-${round}`, v_high));
       await drainChannels(allChannels);
+      throwIfErrors();
     }
 
     const state0 = await getState(engine0, scope);
@@ -230,7 +261,7 @@ describe("P3 · Op dedup: duplicate-delivered op applies exactly once", () => {
     const engine1 = new Engine(new LWWClockStrategy());
 
     // duplicateRate: 1.0 → every batch is duplicated in the channel.
-    const { allChannels } = setupGossip(
+    const { allChannels, throwIfErrors } = setupGossip(
       [engine0, engine1],
       scope,
       300,
@@ -240,6 +271,7 @@ describe("P3 · Op dedup: duplicate-delivered op applies exactly once", () => {
     const opBatch = makeOpBatch(scope, "cmd", "do-something", "op-abc-123");
     await engine0.apply(opBatch);
     await drainChannels(allChannels);
+    throwIfErrors();
 
     // Check via changes() that the op appears exactly once in the durable log.
     let opCount = 0;
@@ -256,11 +288,12 @@ describe("P3 · Op dedup: duplicate-delivered op applies exactly once", () => {
     const engine0 = new Engine(new LWWClockStrategy());
     const engine1 = new Engine(new LWWClockStrategy());
 
-    const { allChannels } = setupGossip([engine0, engine1], scope, 310);
+    const { allChannels, throwIfErrors } = setupGossip([engine0, engine1], scope, 310);
 
     const opBatch = makeOpBatch(scope, "cmd", "ping", "op-ping-1");
     await engine0.apply(opBatch);
     await drainChannels(allChannels);
+    throwIfErrors();
 
     // engine0 should have the op in its durable log exactly once,
     // even though engine1 gossiped it back.
@@ -473,7 +506,7 @@ describe("P9 · 3-replica contention under partition", () => {
       new Engine(new LWWClockStrategy()),
     ];
 
-    const { channels, allChannels } = setupGossip(engines, scope, 900);
+    const { channels, allChannels, throwIfErrors } = setupGossip(engines, scope, 900);
 
     // Phase 1: all 3 write the same unit; highest version (v3) should win everywhere.
     const v1 = clock.mint(); // _ts=1
@@ -520,6 +553,7 @@ describe("P9 · 3-replica contention under partition", () => {
     for (const engine of engines) {
       expect((await getState(engine, scope)).get("u1")).toBe("val-winner");
     }
+    throwIfErrors();
   });
 });
 
@@ -545,7 +579,7 @@ describe("P5 · LWW take-by-version: Resolver is never invoked", () => {
     const engine0 = new Engine(new LWWClockStrategy(), throwingResolver);
     const engine1 = new Engine(new LWWClockStrategy(), throwingResolver);
 
-    const { allChannels } = setupGossip([engine0, engine1], scope, 500);
+    const { allChannels, throwIfErrors } = setupGossip([engine0, engine1], scope, 500);
 
     const v_low  = clock.mint(); // _ts=1
     const v_high = clock.mint(); // _ts=2
@@ -555,6 +589,7 @@ describe("P5 · LWW take-by-version: Resolver is never invoked", () => {
 
     // Should not throw (Resolver not invoked).
     await expect(drainChannels(allChannels)).resolves.toBeUndefined();
+    throwIfErrors();
 
     const state0 = await getState(engine0, scope);
     const state1 = await getState(engine1, scope);
@@ -562,5 +597,146 @@ describe("P5 · LWW take-by-version: Resolver is never invoked", () => {
     // Higher version wins on both replicas.
     expect(state0.get("u1")).toBe("high-val");
     expect(state1.get("u1")).toBe("high-val");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P10 — LWW cross-instance tiebreaking (Finding 1 regression)
+// ---------------------------------------------------------------------------
+
+describe("P10 · LWW cross-instance tiebreaking: _node breaks equal-_ts ties", () => {
+  it("two instances minting the same _ts converge on higher-_node value", async () => {
+    // Use explicit node IDs (100 < 200) so the winner is deterministic
+    // regardless of the order LWWClockStrategy instances are constructed
+    // elsewhere in the test suite.
+    const clock0 = new LWWClockStrategy(100); // lower node
+    const clock1 = new LWWClockStrategy(200); // higher node
+
+    const scope = makeScope("doc-10");
+    const engine0 = new Engine(new LWWClockStrategy(100));
+    const engine1 = new Engine(new LWWClockStrategy(200));
+
+    const { allChannels, throwIfErrors } = setupGossip([engine0, engine1], scope, 1000);
+
+    // Both instances mint their first version — identical _ts (1), different _node.
+    const v0 = clock0.mint(); // { _ts: 1, _node: 100 }
+    const v1 = clock1.mint(); // { _ts: 1, _node: 200 }
+
+    await engine0.apply(makeStateBatch(scope, "u1", "val-node100", "tie-r0", v0));
+    await engine1.apply(makeStateBatch(scope, "u1", "val-node200", "tie-r1", v1));
+
+    await drainChannels(allChannels);
+    throwIfErrors();
+
+    // node 200 > node 100 → val-node200 wins everywhere.
+    const state0 = await getState(engine0, scope);
+    const state1 = await getState(engine1, scope);
+    expect(state0.get("u1")).toBe("val-node200");
+    expect(state1.get("u1")).toBe("val-node200");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P11 — Ephemeral preserves durable base (Finding 2 regression)
+// ---------------------------------------------------------------------------
+
+describe("P11 · Ephemeral preserves durable base in durableStateUnits", () => {
+  it("ephemeral winning in snapshot() does not evict the durable entry from changes()", async () => {
+    const clock = new LWWClockStrategy();
+    const scope = makeScope("doc-11");
+    const engine = new Engine(new LWWClockStrategy());
+
+    const vDurable = clock.mint();   // _ts=1
+    const vEphemeral = clock.mint(); // _ts=2
+
+    // Durable write first.
+    await engine.apply(makeStateBatch(scope, "u1", "durable-val", "d1", vDurable));
+
+    // Ephemeral write with higher version to the SAME unit.
+    await engine.apply({
+      scope,
+      changes: [{
+        id: makeChangeId("eph-11"),
+        scope,
+        unit: makeConflictUnit("u1"),
+        kind: "state",
+        lifetime: ephemeral(5000),
+        value: "ephemeral-val",
+        version: vEphemeral,
+      }],
+    });
+
+    // Snapshot shows ephemeral (newer) — correct for live state.
+    const state = await getState(engine, scope);
+    expect(state.get("u1")).toBe("ephemeral-val");
+
+    // Durable base is still in the log and replayable.
+    const replayedIds = new Set<string>();
+    const replayedValues = new Map<string, unknown>();
+    for await (const batch of engine.changes(scope, null)) {
+      for (const c of batch.changes) {
+        replayedIds.add(c.id.value);
+        replayedValues.set(c.unit.key, c.value);
+      }
+    }
+    // The durable entry is in changes() (id: makeStateBatch generates "c-u1-d1")
+    expect(replayedIds.has("c-u1-d1")).toBe(true);
+    // The ephemeral is NOT in changes() (T3)
+    expect(replayedIds.has("eph-11")).toBe(false);
+
+    // A subsequent durable write beats the ephemeral — snapshot updates to durable.
+    const vDurable2 = clock.mint(); // _ts=3
+    await engine.apply(makeStateBatch(scope, "u1", "durable-val-2", "d2", vDurable2));
+    const state2 = await getState(engine, scope);
+    expect(state2.get("u1")).toBe("durable-val-2");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P12 — Per-scope seenIds (Finding 5 regression)
+// ---------------------------------------------------------------------------
+
+describe("P12 · Per-scope seenIds: same change id accepted independently per scope", () => {
+  it("the same id string in two different scopes is not cross-deduped", async () => {
+    const clock = new LWWClockStrategy();
+    const scope1 = makeScope("scope-12a");
+    const scope2 = makeScope("scope-12b");
+    const engine = new Engine(new LWWClockStrategy());
+
+    const v1 = clock.mint();
+    const v2 = clock.mint();
+
+    // Apply the same id string to two different scopes.
+    await engine.apply({
+      scope: scope1,
+      changes: [{
+        id: makeChangeId("shared-id"),
+        scope: scope1,
+        unit: makeConflictUnit("u1"),
+        kind: "state",
+        lifetime: { class: "durable" },
+        value: "val-scope1",
+        version: v1,
+      }],
+    });
+
+    await engine.apply({
+      scope: scope2,
+      changes: [{
+        id: makeChangeId("shared-id"),
+        scope: scope2,
+        unit: makeConflictUnit("u1"),
+        kind: "state",
+        lifetime: { class: "durable" },
+        value: "val-scope2",
+        version: v2,
+      }],
+    });
+
+    // Both scopes accepted their value independently — no cross-scope dedup.
+    const state1 = await getState(engine, scope1);
+    const state2 = await getState(engine, scope2);
+    expect(state1.get("u1")).toBe("val-scope1");
+    expect(state2.get("u1")).toBe("val-scope2");
   });
 });

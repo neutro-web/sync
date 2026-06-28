@@ -13,18 +13,21 @@ the source, the source wins and this file is stale → fix it.
 **Maintenance.** Update in the same pass that lands code, as a ready-to-commit edit (same
 discipline as log entries). Keep it to roughly this length; detail belongs in the code.
 
-Last verified against source: **2026-06-25 (Phase 1b engine complete).** Seam Contract **v1.0**.
+Last verified against source: **2026-06-28 (Phase 1b hardened — 10 findings fixed).** Seam Contract **v1.0**.
 
 ---
 
-## Status: PHASE 1b ENGINE COMPLETE — strategies and real transports not yet built
+## Status: PHASE 1b ENGINE COMPLETE + HARDENED — strategies and real transports not yet built
 
 The real `Feed` engine (`Engine` class) is built and verified. `LWWClockStrategy` is the first
-concrete `ClockStrategy`. All 18 tests pass (`tsc --noEmit` clean). The stubs in
-`test/harness/stubs.ts` are unchanged — the real engine lives alongside them, verified by
-separate tests in `test/engine/`. T3 (ephemeral off durable path) and T4 LWW path are now
-tested. The `concurrent` → `Resolver` conflict path is consciously deferred to Phase 2
-(unreachable under LWW). Phase 2 adds logical/hybrid clock and CRDT-position strategies.
+concrete `ClockStrategy`. All 24 tests pass (`tsc --noEmit` clean). A high-effort code review
+surfaced 10 findings; all 10 were addressed in this session. Key structural improvements:
+`LWWClockStrategy` now carries a `_node` tiebreaker for cross-instance LWW correctness;
+`ScopeState` maintains separate `durableStateUnits` / `ephemeralStateUnits` maps so ephemeral
+writes never evict the durable base; `seenIds` is now per-scope; the `concurrent` arm no longer
+poisons seenIds. Three new regression tests added (P10/P11/P12). The `concurrent` → `Resolver`
+conflict path is consciously deferred to Phase 2 (unreachable under LWW). Phase 2 adds
+logical/hybrid clock and CRDT-position strategies.
 
 ---
 
@@ -65,7 +68,7 @@ not built · **—** = not created.
 ### `src/strategies/` → `@neutro/sync/strategies`
 | File | Status | Notes |
 |---|---|---|
-| `src/strategies/lww.ts` | REAL | `LWWClockStrategy implements ClockStrategy`. Monotonic integer counter; `mint()` increments; `compare()` returns `"before"` or `"after"`, **never `"concurrent"`**. Internal version shape: `{ _ts: number }`. Strategy-owned, opaque to engine. |
+| `src/strategies/lww.ts` | REAL | `LWWClockStrategy implements ClockStrategy`. Lamport-style counter; `mint(prev?)` advances past `prev._ts`. `compare()` returns `"before"` or `"after"`, **never `"concurrent"`**. Internal version shape: `{ _ts: number, _node: number }` — `_node` breaks equal-`_ts` ties deterministically. Strategy-owned, opaque to engine. |
 | logical/hybrid clock | — | Phase 2. First strategy to produce `concurrent` — required to exercise T4 conflict path. |
 | CRDT-position strategy | — | Phase 2. |
 
@@ -93,7 +96,7 @@ not built · **—** = not created.
 ### `test/engine/`
 | File | Status | Notes |
 |---|---|---|
-| `test/engine/engine.test.ts` | REAL | 11 tests covering P2–P5, P8–P9. Gossip wired via `Engine.subscribe()` + `ChannelSimulator` (no harness dependency). P2: LWW contention; P3: op dedup; P4a–c: T3 ephemeral assertions; P5: take-by-version with throwing Resolver; P8: reconnect replay via `changes(since)`; P9: 3-replica contention under partition. 21 total tests passing. |
+| `test/engine/engine.test.ts` | REAL | 14 tests covering P2–P5, P8–P12. Gossip wired via `Engine.subscribe()` + `ChannelSimulator` (no harness dependency). P2: LWW contention; P3: op dedup; P4a–c: T3 ephemeral assertions; P5: take-by-version with throwing Resolver; P8: reconnect replay via `changes(since)`; P9: 3-replica contention under partition; P10: LWW cross-instance tiebreaking; P11: ephemeral preserves durable base; P12: per-scope seenIds. 24 total tests passing. `throwIfErrors()` pattern surfaces async gossip apply() failures. |
 
 ### `integration/`
 | File | Status | Notes |
@@ -107,12 +110,13 @@ not built · **—** = not created.
 ### Production seams (real)
 
 **`Engine.apply(batch: ChangeBatch): Promise<void>`**
-Branches on `change.kind`. State: global seenIds dedup, then `ClockStrategy.compare(incoming,
-existing)` — `"after"` accepts, `"before"` skips, `"concurrent"` deferred. Op (no version):
-seenIds dedup only. Op (with version): seenIds + version compare. T3 fork: durable → advance
-`cursorSeq` + append to `durableLog`; ephemeral → update `stateUnits` only. Fires subscriptions
-synchronously for accepted changes (required for drain-round correctness). Returns
-`Promise.resolve()` — synchronous internally.
+Branches on `change.kind`. State: per-scope seenIds dedup, then `ClockStrategy.compare(incoming,
+currentWinner)` — `"after"` accepts, `"before"` skips, `"concurrent"` deferred without marking
+id seen (open for Phase 2 re-routing). Op (no version): seenIds dedup only. Op (with version):
+seenIds dedup, then version compare (same deferred semantics on `"concurrent"`). T3 fork: durable
+→ advance `cursorSeq` + append to `durableLog`; ephemeral → update `ephemeralStateUnits` only.
+Fires subscriptions synchronously for accepted changes (required for drain-round correctness).
+Returns `Promise.resolve()` — synchronous internally.
 
 **`Engine.changes(scope, since: Cursor | null): AsyncIterable<ChangeBatch>`**
 Yields durable log entries with `seq > since._seq` (or all if `since` is null) as a single
@@ -120,8 +124,9 @@ Yields durable log entries with `seq > since._seq` (or all if `since` is null) a
 durable seq.
 
 **`Engine.snapshot(scope): Promise<Snapshot>`**
-Returns all entries in `stateUnits` (current state, both durable and ephemeral). No cursor.
-Ephemeral values are live current state even though they are not in the durable log.
+Returns the per-unit winner from `durableStateUnits` ∪ `ephemeralStateUnits` (higher version
+wins per unit). No cursor. Ephemeral values are live current state even though they are not in
+the durable log. Durable base is preserved in `durableStateUnits` even when ephemeral wins.
 
 **`Engine.subscribe(scope, { onBatch, onConflict }): Subscription`**
 Registers per-scope handlers. `onBatch` fires synchronously in `apply()` for each accepted
@@ -130,14 +135,15 @@ batch. `onConflict` is wired but not yet invoked (awaits Phase 2 `concurrent` pa
 
 **`Engine.getCursor(scope): Cursor`**
 Returns `makeCursor(scope, cursorSeq)`. Not on the `Feed` interface — test assertion helper only.
+Cursors are engine-local ordinals: NOT safe to use cross-replica.
 
-**`LWWClockStrategy.mint(_prev?): Version`**
-Increments internal counter, returns `{ _ts: counter }` cast to `Version`. Monotonically
-increasing per instance.
+**`LWWClockStrategy.mint(prev?): Version`**
+Lamport-style advance: `_counter = max(_counter, prev._ts) + 1`. Returns `{ _ts, _node }` cast
+to `Version`. `_node` is a per-instance unique id (module-level counter or explicit in ctor).
 
 **`LWWClockStrategy.compare(a, b): "before" | "after" | "concurrent"`**
-Compares `_ts` fields. Returns `"after"` if `a._ts > b._ts`, `"before"` otherwise. Never
-returns `"concurrent"`.
+Orders by `_ts` first; ties broken by `_node`. Never returns `"concurrent"` — LWW's defining
+property. An identical `(_ts, _node)` pair returns `"before"` (idempotent re-apply).
 
 **`InProcessTransport.send(batch: ChangeBatch): Promise<void>`**
 Calls `channelFn(batch)` synchronously, returns `Promise.resolve()`. Resolves on hand-off (§7).
@@ -156,32 +162,26 @@ engine tests after `drainToQuiescence()`.
 
 ## Known gaps / defects
 
-### Finding #1 — `concurrent` arm silently drops the incoming change [HIGH — Phase 2 entry condition]
-`_applyState` and `_applyOp` call `this._seenIds.add(change.id.value)` then `return false`
-when `cmp === "concurrent"`. The comment says "hold both, do not silently decide" but the code
-holds **neither** — the incoming change is silently dropped and its id is marked seen, making
-it permanently invisible. The existing change is retained but the conflict is never routed to
-the `Resolver` or surfaced as `defer`. Inert under LWW (unreachable), but the instant a Phase 2
-strategy returns `concurrent` this is a **live T4 violation**. Phase 2 must trust the code over
-the comment: replace `return false` with a real route-to-Resolver / hold-as-defer, proven by a
-test that drives a genuine `concurrent` outcome.
+### Finding — `concurrent` arm wired but never exercised [Phase 2 entry condition]
+`_applyState` and `_applyOp` have an honest `concurrent` branch (returns false without marking
+id seen — fixed in Phase 1b hardening). But neither the route-to-Resolver call nor a concrete
+`concurrent`-producing strategy exist. The branch is an honest deferral; Phase 2 must activate
+it with a strategy that returns `"concurrent"` and a real `Resolver`. **P5's "throwing Resolver
+never invoked" passes trivially — the Resolver is dead under ALL current paths.** Phase 2 must
+prove the wiring.
 
-### Finding #2 — `_seenIds` grows unbounded [MED — Phase 3]
-Global id-dedup set, no eviction or TTL. Correct for the in-memory Phase 1b sandbox. A real
-persistence layer (Phase 3) needs a compaction or sliding-window eviction strategy.
-
-### Finding #3 — `Resolver` / `onConflict` are wired but never invoked [MED — note on P5]
+### Finding — `Resolver` / `onConflict` are wired but never invoked [MED — note on P5]
 The constructor `resolver?` and `subscribe`'s `onConflict` callback are registered but
-`apply()` never reaches the call site (the only path that would invoke them is the `concurrent`
-arm, which returns first — Finding #1). Consequence: **P5's "throwing Resolver never invoked"
-passes trivially** — the Resolver is dead under *all* current paths, not just the LWW path.
-P5 is valid as far as it goes (LWW take-by-version correctly avoids the Resolver); it just
-proves less than its name suggests. Phase 2 must activate this wiring.
+`apply()` never reaches any invocation path. Phase 2 must activate this wiring.
+
+### Finding — `seenIds` sets grow unbounded [MED — Phase 3]
+Per-scope `Set<string>`, no eviction or TTL. Correct for the in-memory Phase 1b sandbox.
+A real persistence layer (Phase 3) needs a compaction or sliding-window eviction strategy.
 
 ### Deferred (reason recorded)
-- **`concurrent` code fix** → Phase 2 (needs a `concurrent`-producing strategy; spike rule
-  bars writing a test for an unreachable branch using only LWW).
-- **`_seenIds` eviction** → Phase 3 (persistence).
+- **`concurrent` routing to Resolver** → Phase 2 (needs a `concurrent`-producing strategy;
+  spike rule bars writing a test for an unreachable branch using only LWW).
+- **seenIds eviction** → Phase 3 (persistence).
 - **`changes()` single-batch / no chunking** → Phase 3 (production log ergonomics).
 - **`onBatch` fires synchronously; a throwing subscriber breaks `apply`** → contract note:
   subscription handlers must not throw; no code change needed.

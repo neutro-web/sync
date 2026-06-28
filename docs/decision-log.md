@@ -25,16 +25,17 @@
 
 ## Current State
 
-_Last updated: 2026-06-25. Seam Contract **v1.0** (frozen)._
+_Last updated: 2026-06-28. Seam Contract **v1.0** (frozen)._
 
 ### Status at a glance
 - **Seam contract:** FROZEN at v1.0. T1–T5 ratified; eight seam types defined; §9 consumer map
   and §9.1 local-derived-state rule in place. This is the founding semantics.
 - **Governance scaffold:** Complete. Charter, custom instructions, AGENTS.md, decision log,
   implementation-state all in place.
-- **Code:** Phase 1b complete. Real `Engine` (`Feed` + `ScopeRouter`), `LWWClockStrategy`,
-  engine gate tests. 18 tests passing. `tsc --noEmit` clean. `concurrent` → `Resolver` path
-  deferred to Phase 2 (unreachable under LWW).
+- **Code:** Phase 1b complete + hardened. Real `Engine` (`Feed` + `ScopeRouter`),
+  `LWWClockStrategy`, engine gate tests. 24 tests passing. `tsc --noEmit` clean.
+  Ten findings from the Phase 1b code review addressed (see 2026-06-28 entry).
+  `concurrent` → `Resolver` path deferred to Phase 2 (unreachable under LWW).
 
 ### Locked (do not drift without an explicit superseding entry)
 - **Standalone** — `ns` has no dependency on any neutro sibling. No `neutro/*` runtime import
@@ -275,3 +276,58 @@ Implemented the real `Feed` + `ScopeRouter` engine and LWW as the first concrete
    the `concurrent` arm, which returns before it. P5's "throwing Resolver never invoked" passes
    trivially — the Resolver is never invoked under *any* current path, not just the LWW path.
    Phase 2 must activate this wiring; P5 proves less than its name suggests.
+
+### 2026-06-28 — Phase 1b code review: 10 findings fixed [LOCKED]
+
+A high-effort code review of all Phase 1b work surfaced 10 findings (8 finders × 5 verifiers).
+All 10 fixed in this session. 24/24 tests passing; `tsc --noEmit` clean.
+
+**Structural fixes (code changes):**
+
+1. **F1 — LWW cross-instance tiebreaking.** `compare()` returned `"before"` on equal `_ts`,
+   silently making equal-ts from independent instances first-write-wins and non-deterministic.
+   Fix: `LWWVersionInternals` now carries `_node` (unique per instance, module-level counter).
+   `compare()` uses `_ts` first, then `_node` as a deterministic tiebreaker. `mint(prev?)` is
+   now a Lamport clock (`max(_counter, prev._ts) + 1`). New regression test P10 verifies.
+
+2. **F2 — Ephemeral overwrites durable base.** `stateUnits` was a single map; an ephemeral
+   change with a higher version would overwrite the durable entry, permanently losing the durable
+   base. Fix: `ScopeState` now has two separate maps — `durableStateUnits` and
+   `ephemeralStateUnits`. `_stateWinner()` picks the higher-version entry per unit. `snapshot()`
+   merges both maps. Durable base is preserved even when ephemeral is currently winning.
+   New regression test P11 verifies.
+
+3. **F3 — `concurrent` arm poisoned seenIds.** Both `_applyState` and `_applyOp` called
+   `seenIds.add(id)` then `return false` in the `concurrent` branch, permanently blocking
+   Phase 2 re-routing. Fix: the `concurrent` branch no longer adds to seenIds. The id stays
+   open for Phase 2 re-routing. Inert under LWW; correct for Phase 2.
+
+4. **F5 — seenIds was global across scopes.** A single `Set<string>` on `Engine` meant the
+   same id string in two different scopes would be cross-deduped (the second would be silently
+   dropped). Fix: `seenIds` moved to `ScopeState` — one `Set<string>` per scope. New regression
+   test P12 verifies same-id-in-different-scopes accepted independently.
+
+**Test/harness fixes:**
+
+5. **F6 — gossip apply() errors silently swallowed.** `void engines[j]!.apply(b)` in gossip
+   wiring discarded the returned Promise; a rejected apply would be invisible. Fix: `setupGossip`
+   now collects errors via `.catch()` and exposes `throwIfErrors()` on its return value. All
+   gossip-based tests call `throwIfErrors()` after `drainChannels()`.
+
+6. **F10 — `drainChannels` co-location rationale.** Added a doc comment explaining why the
+   drain algorithm is co-located with the engine tests rather than extracted to the harness
+   (different wiring context; harness files must remain unmodified per P1 gate).
+
+**Import cleanup:**
+
+7. **F7** — Removed dead `makeChangeId` import from `src/core/engine.ts`.
+8. **F8** — Removed dead `type VersionedChange` import from `src/core/engine.ts`.
+9. **F9** — Removed inline `import("./types.ts").Version` from `ScopeState` interface;
+   `Version` is now a top-level named import.
+
+**Documentation fixes:**
+
+10. **F4** — Cursor locality documented in `Engine.getCursor()` and the class-level JSDoc:
+    cursors are engine-local ordinals; cross-replica use is incorrect.
+
+**Regression tests added:** P10 (LWW tie), P11 (ephemeral preserves durable), P12 (per-scope seenIds).
