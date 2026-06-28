@@ -13,21 +13,20 @@ the source, the source wins and this file is stale → fix it.
 **Maintenance.** Update in the same pass that lands code, as a ready-to-commit edit (same
 discipline as log entries). Keep it to roughly this length; detail belongs in the code.
 
-Last verified against source: **2026-06-28 (Phase 1b hardened — 10 findings fixed).** Seam Contract **v1.0**.
+Last verified against source: **2026-06-28 (Phase 2 complete — conflict resolution activated).** Seam Contract **v1.0**.
 
 ---
 
-## Status: PHASE 1b ENGINE COMPLETE + HARDENED — strategies and real transports not yet built
+## Status: PHASE 2 CONFLICT RESOLUTION COMPLETE — vector clock, Model C engine, ResolverPump
 
-The real `Feed` engine (`Engine` class) is built and verified. `LWWClockStrategy` is the first
-concrete `ClockStrategy`. All 24 tests pass (`tsc --noEmit` clean). A high-effort code review
-surfaced 10 findings; all 10 were addressed in this session. Key structural improvements:
-`LWWClockStrategy` now carries a `_node` tiebreaker for cross-instance LWW correctness;
-`ScopeState` maintains separate `durableStateUnits` / `ephemeralStateUnits` maps so ephemeral
-writes never evict the durable base; `seenIds` is now per-scope; the `concurrent` arm no longer
-poisons seenIds. Three new regression tests added (P10/P11/P12). The `concurrent` → `Resolver`
-conflict path is consciously deferred to Phase 2 (unreachable under LWW). Phase 2 adds
-logical/hybrid clock and CRDT-position strategies.
+The T4 `concurrent` path activated in Phase 2. `VectorClockStrategy` is the first strategy
+returning `"concurrent"`. Engine now implements Model C (detect-and-hold): the `concurrent` arm
+records open conflicts in `ScopeState.openConflicts`, fires `onConflict` as a notification, and
+returns synchronously — `apply()` never awaits resolution. `resolveConflict(scope, unit, resolution)`
+lands a resolution directly into the confirmed maps. `ResolverPump` bridges `onConflict` →
+`resolver.resolve` → `resolveConflict` as an optional layer. Convergence proven on 2 replicas
+under fault injection using approach (a): deterministic pure-function resolver (pick-by-id).
+Q1–Q7 gate passing; 36 tests total; `tsc --noEmit` clean.
 
 ---
 
@@ -61,16 +60,17 @@ not built · **—** = not created.
 | File | Status | Notes |
 |---|---|---|
 | `src/core/types.ts` | REAL | Full TypeScript expression of seam contract v1.0. All eight seam types: `Change`/`StateChange`/`OpChange`/`VersionedChange`, `Cursor`/`Version`/`ClockStrategy`, `Lifetime`, `ChangeBatch`/`Snapshot`/`Feed`, `Conflict`/`Resolution`/`Resolver`, `Scope`/`Subscription`/`ScopeRouter`, `Transport`, opaque tokens. Factory helpers: `makeChangeId`, `makeScope`, `makeConflictUnit`, `makeCursor`, `DURABLE`, `ephemeral`. |
-| `src/core/engine.ts` | REAL | `Engine implements Feed, ScopeRouter`. In-memory. T1 kind branching; T2 version opacity (only `compare()` called); T3 lifetime fork (ephemeral off durable path); T4 `concurrent` branch present and deferred; T5 per-scope causal order via synchronous subscription dispatch. `getCursor(scope)` for test assertions. |
-| conflict detection (`concurrent` path) | DEFERRED | **Phase 2 entry condition.** The `concurrent` arm in `_applyState` and `_applyOp` exists, is documented, and returns without applying. A strategy returning `concurrent` (logical/CRDT clock) plus a concrete `Resolver` are required to exercise it. |
+| `src/core/engine.ts` | REAL | `Engine implements Feed, ScopeRouter`. In-memory. T1 kind branching; T2 version opacity (only `compare()` called); T3 lifetime fork (ephemeral off durable path); T4 `concurrent` path activated (Model C); T5 per-scope causal order via synchronous subscription dispatch. `getCursor(scope)` for test assertions. `resolveConflict(scope, unit, resolution)` for manual/automatic resolution. |
+| conflict detection (`concurrent` path) | REAL | Model C detect-and-hold. `ScopeState.openConflicts` holds both competing `VersionedChange`s per unit. `concurrent` arm fires `onConflict` as notification, returns synchronously. `resolveConflict(scope, unit, resolution)` lands resolution directly into confirmed maps; advances cursor/log for durable wins. `take-local`/`take-remote` supported; `defer` leaves conflict open; `merged` throws (deferred — requires `ClockStrategy.mergeVersions`). Note: `_applyOp` concurrent arm consciously deferred — op-with-version path stores only `Version`, not full `VersionedChange`; needs follow-up. |
 | scope routing (`ScopeRouter`) | REAL | `Engine.subscribe(scope, { onBatch, onConflict })` → `Subscription`. Per-scope; fires synchronously on accepted changes. |
+| `src/core/resolver-pump.ts` | REAL | `ResolverPump`. Subscribes to `onConflict`; calls `resolver.resolve(conflict)`; calls `resolveConflict` with the result. Async resolvers: returns `defer` synchronously while the promise settles. Absent ⇒ conflicts stay open for manual resolution. Closes Phase 1b Finding #3 (Resolver/onConflict were dead under all paths). |
 
 ### `src/strategies/` → `@neutro/sync/strategies`
 | File | Status | Notes |
 |---|---|---|
 | `src/strategies/lww.ts` | REAL | `LWWClockStrategy implements ClockStrategy`. Lamport-style counter; `mint(prev?)` advances past `prev._ts`. `compare()` returns `"before"` or `"after"`, **never `"concurrent"`**. Internal version shape: `{ _ts: number, _node: number }` — `_node` breaks equal-`_ts` ties deterministically. Strategy-owned, opaque to engine. |
-| logical/hybrid clock | — | Phase 2. First strategy to produce `concurrent` — required to exercise T4 conflict path. |
-| CRDT-position strategy | — | Phase 2. |
+| `src/strategies/vector-clock.ts` | REAL | `VectorClockStrategy implements ClockStrategy`. Version shape: `{ _vec: Record<nodeId, number> }`. `mint(prev?)` merges prev vector then increments own slot. `compare()` returns `"concurrent"` for causally-independent versions; `"before"`/`"after"` for ordered versions. First strategy to exercise T4 conflict path. |
+| CRDT-position strategy | — | Phase 3+. |
 
 ### `src/transports/` → `@neutro/sync/transports`
 | File | Status | Notes |
@@ -96,7 +96,8 @@ not built · **—** = not created.
 ### `test/engine/`
 | File | Status | Notes |
 |---|---|---|
-| `test/engine/engine.test.ts` | REAL | 14 tests covering P2–P5, P8–P12. Gossip wired via `Engine.subscribe()` + `ChannelSimulator` (no harness dependency). P2: LWW contention; P3: op dedup; P4a–c: T3 ephemeral assertions; P5: take-by-version with throwing Resolver; P8: reconnect replay via `changes(since)`; P9: 3-replica contention under partition; P10: LWW cross-instance tiebreaking; P11: ephemeral preserves durable base; P12: per-scope seenIds. 24 total tests passing. `throwIfErrors()` pattern surfaces async gossip apply() failures. |
+| `test/engine/engine.test.ts` | REAL | 24 tests covering P1–P12 (harness + Phase 1b engine). Harness tests (P1–P7, 10 tests) verify convergence harness machinery and engine gate coverage. Engine tests (P8–P12, 14 tests) cover gossip wired via `Engine.subscribe()` + `ChannelSimulator`. P8: reconnect replay via `changes(since)`; P9: 3-replica contention under partition; P10: LWW cross-instance tiebreaking; P11: ephemeral preserves durable base; P12: per-scope seenIds. |
+| `test/engine/phase2-conflict.test.ts` | REAL | 12 tests covering Q1–Q7 (Phase 2 gate). Q1: vector clock concurrent detection (4 tests). Q2: Model C detect-and-hold (2). Q3: ResolverPump resolver invocation. Q4: 2-replica convergence under fault injection with deterministic resolver (2). Q5: defer holds + subsequent resolution + no-op on non-conflicting unit (2). Q6: last-confirmed-winner reads during open conflict. |
 
 ### `integration/`
 | File | Status | Notes |
@@ -162,33 +163,25 @@ engine tests after `drainToQuiescence()`.
 
 ## Known gaps / defects
 
-### Finding — `concurrent` arm wired but never exercised [Phase 2 entry condition]
-`_applyState` and `_applyOp` have an honest `concurrent` branch (returns false without marking
-id seen — fixed in Phase 1b hardening). But neither the route-to-Resolver call nor a concrete
-`concurrent`-producing strategy exist. The branch is an honest deferral; Phase 2 must activate
-it with a strategy that returns `"concurrent"` and a real `Resolver`. **P5's "throwing Resolver
-never invoked" passes trivially — the Resolver is dead under ALL current paths.** Phase 2 must
-prove the wiring.
-
-### Finding — `Resolver` / `onConflict` are wired but never invoked [MED — note on P5]
-The constructor `resolver?` and `subscribe`'s `onConflict` callback are registered but
-`apply()` never reaches any invocation path. Phase 2 must activate this wiring.
-
 ### Finding — `seenIds` sets grow unbounded [MED — Phase 3]
-Per-scope `Set<string>`, no eviction or TTL. Correct for the in-memory Phase 1b sandbox.
+Per-scope `Set<string>`, no eviction or TTL. Correct for the in-memory Phase 2 sandbox.
 A real persistence layer (Phase 3) needs a compaction or sliding-window eviction strategy.
 
+### Finding — `_applyOp` concurrent arm still deferred [Phase 2 follow-up]
+`_applyOp` stores only the last accepted `Version` per unit in `opUnitVersions`, not the full
+`VersionedChange`. A correct `Conflict` payload requires both `local` and `remote` as
+`VersionedChange`. Fix: store the full `VersionedChange` in `opUnitVersions` (rename to
+`opUnitChanges: Map<string, VersionedChange>`). Out of scope for Phase 2 per the gate file.
+
 ### Deferred (reason recorded)
-- **`concurrent` routing to Resolver** → Phase 2 (needs a `concurrent`-producing strategy;
-  spike rule bars writing a test for an unreachable branch using only LWW).
 - **seenIds eviction** → Phase 3 (persistence).
 - **`changes()` single-batch / no chunking** → Phase 3 (production log ergonomics).
 - **`onBatch` fires synchronously; a throwing subscriber breaks `apply`** → contract note:
   subscription handlers must not throw; no code change needed.
 - **`InProcessTransport` connect/disconnect lifecycle untested** → Phase 3 (real transport
   work; `_setConnected` fires handlers but the T3 reconnect fork is not exercised).
-- **Op-with-version conflict path untested** → Phase 2 (`opUnitVersions` tracker exists but
-  no test exercises a version-compare collision on an op change).
+- **`_applyOp` concurrent arm** → Phase 3 (needs full VersionedChange per unit;
+  state-path conflicts proven in Phase 2; op-path is independent follow-up).
 
 ---
 

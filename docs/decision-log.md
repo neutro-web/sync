@@ -25,17 +25,14 @@
 
 ## Current State
 
-_Last updated: 2026-06-28. Seam Contract **v1.0** (frozen)._
+_Last updated: 2026-06-28. Seam Contract **v1.0** (frozen)._ Phase 2 complete.
 
 ### Status at a glance
 - **Seam contract:** FROZEN at v1.0. T1–T5 ratified; eight seam types defined; §9 consumer map
   and §9.1 local-derived-state rule in place. This is the founding semantics.
 - **Governance scaffold:** Complete. Charter, custom instructions, AGENTS.md, decision log,
   implementation-state all in place.
-- **Code:** Phase 1b complete + hardened. Real `Engine` (`Feed` + `ScopeRouter`),
-  `LWWClockStrategy`, engine gate tests. 24 tests passing. `tsc --noEmit` clean.
-  Ten findings from the Phase 1b code review addressed (see 2026-06-28 entry).
-  `concurrent` → `Resolver` path deferred to Phase 2 (unreachable under LWW).
+- **Code:** Phase 2 complete. `VectorClockStrategy` + Model C engine (`openConflicts`, `resolveConflict`) + `ResolverPump`. 36 tests passing. `tsc --noEmit` clean. T4 concurrent path activated and proven on ≥2 replicas.
 
 ### Locked (do not drift without an explicit superseding entry)
 - **Standalone** — `ns` has no dependency on any neutro sibling. No `neutro/*` runtime import
@@ -61,9 +58,12 @@ _Last updated: 2026-06-28. Seam Contract **v1.0** (frozen)._
 - **LWW behind the ClockStrategy slot** — `LWWClockStrategy` is the first concrete strategy.
   Never inlined into `Feed.apply`; engine calls only `compare()`. Phase 2 (logical clock,
   CRDT position) is pure addition. See 2026-06-25 Phase 1b entry.
-- **`concurrent` path deferred to Phase 2** — unreachable under LWW. Branch present in
-  engine; Phase 2 entry condition is a strategy that produces `concurrent` plus a concrete
-  `Resolver`. See 2026-06-25 Phase 1b entry.
+- **T4 — `concurrent` path — Model C activated [Phase 2]** — detect-and-hold: `apply()` records
+  open conflict + fires `onConflict` synchronously; engine does not own resolution lifecycle.
+  `resolveConflict(scope, unit, resolution)` is the internal resolution seam. `ResolverPump`
+  is the optional automatic bridge. Convergence: approach (a) — deterministic pure-function
+  resolver proven on ≥2 replicas under fault injection. `_applyOp` concurrent arm deferred
+  (needs full VersionedChange stored per unit). See 2026-06-28 Phase 2 entry.
 
 ### Open gates (surfaced, NOT decided — do not build past)
 - **G2 — Public API surface**: consumer-facing client/builder ergonomics atop the frozen seam.
@@ -331,3 +331,55 @@ All 10 fixed in this session. 24/24 tests passing; `tsc --noEmit` clean.
     cursors are engine-local ordinals; cross-replica use is incorrect.
 
 **Regression tests added:** P10 (LWW tie), P11 (ephemeral preserves durable), P12 (per-scope seenIds).
+
+### 2026-06-28 — Phase 2 conflict resolution activated: Model C, VectorClockStrategy, ResolverPump [LOCKED]
+
+**Entry condition met.** A strategy returning `"concurrent"` (`VectorClockStrategy`) implemented
+and a real `Resolver` path activated. All seven Phase 2 gate items (Q1–Q7) passing. 36 total
+tests; `tsc --noEmit` clean.
+
+**Closed findings from Phase 1b review:**
+- Finding #1 (`concurrent` arm silent drop + seenIds poisoning): the F3 fix (arm no longer adds
+  to seenIds) was a prerequisite; this phase activated the arm with correct detect-and-hold behavior.
+- Finding #3 (`Resolver`/`onConflict` dead under all paths): `ResolverPump` makes the wiring live.
+  Q3 proves the resolver is now invoked. P5's "throwing Resolver never invoked" premise was
+  correct at the time; Phase 2 has now superseded it.
+
+**VectorClockStrategy (Q1).** `src/strategies/vector-clock.ts`. Version shape:
+`{ _vec: Record<nodeId, number> }`. `mint(prev?)` merges all entries from `prev`'s vector then
+increments the local node's slot. `compare()` returns `"concurrent"` for causally-independent
+pairs (neither vector dominates the other); `"before"`/`"after"` for ordered pairs. Replaces the
+"never concurrent" LWW guarantee for use cases that require causal conflict detection.
+
+**Model C engine changes (Q2, Q5, Q6).** `ScopeState.openConflicts: Map<unitKey, {local, remote}>`
+holds both competing `VersionedChange`s. The `concurrent` arm in `_applyState` records the open
+conflict, fires `onConflict` as a notification on all subscriptions, and returns synchronously —
+`apply()` never awaits resolution. `resolveConflict(scope, unit, resolution)` is a new public
+engine method (internal seam, NOT G2 API): `take-local` marks both ids seen and returns (local
+is already confirmed); `take-remote` directly writes the winner to the confirmed maps, advances
+cursor/log (if durable), and fires `onBatch`; `merged` throws — deferred pending
+`ClockStrategy.mergeVersions` (a seam-contract addition needed to produce a version that causally
+dominates both inputs, preventing recursive conflict on gossip); `defer` is a no-op — conflict
+stays open. Phase 2 holds one open conflict per unit (last-in wins on overwrite); multi-way
+conflict handling is a follow-up. Last-confirmed-winner read semantics hold automatically because
+open conflicts never write to the confirmed maps.
+
+**ResolverPump (Q3).** `src/core/resolver-pump.ts`. Subscribes to `onConflict`; calls
+`resolver.resolve(conflict)`; calls `resolveConflict` with the result. Async resolvers: returns
+`defer` synchronously while the promise settles. Absent ⇒ conflicts stay open for manual
+`resolveConflict` calls.
+
+**Convergence mechanism: approach (a) — deterministic pure-function resolver (Q4).** The
+deterministic resolver is a pure function of the conflict payload: picks the change with the
+lexicographically-larger `id.value`. Because the function is symmetric (same winner regardless
+of which side is `local` vs `remote`), every replica independently computes the same decision
+without propagating the resolution as a separate change. Proven on 2 replicas under fault
+injection (drop/reorder/duplicate). `merged` is not implemented in Phase 2 (throws explicitly); correct support requires
+`ClockStrategy.mergeVersions` to produce a version that causally dominates both inputs —
+documented in the gate file's scope boundary.
+
+**Conscious scope boundary.** `_applyOp`'s `concurrent` arm remains deferred: the path stores
+only `Version` per unit (`opUnitVersions`), not a full `VersionedChange`. A correct `Conflict`
+payload requires both `local` and `remote` as full `VersionedChange`. Follow-up: rename
+`opUnitVersions` to `opUnitChanges: Map<string, VersionedChange>` and route op conflicts through
+the same Model C path.
