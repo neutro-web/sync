@@ -31,6 +31,10 @@ import type { Engine } from "./engine.ts";
  *
  * Async resolvers: `onConflict` returns `{ decision: "defer" }` synchronously;
  * the promise settles and calls `resolveConflict` later.
+ *
+ * **Convergence requirement:** for local (non-propagated) resolution, the
+ * `Resolver` passed here MUST be a deterministic pure function — see
+ * `docs/seam-contract.md` §5 for the full expectation.
  */
 export class ResolverPump {
   private readonly _sub: { unsubscribe(): void };

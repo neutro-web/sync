@@ -242,7 +242,9 @@ export class Engine implements Feed, ScopeRouter {
           return false;
         }
         if (cmp === "concurrent") {
-          // T4 deferred (unreachable under LWW). Phase 2 will route to Resolver.
+          // T4 deferred — op path stays deferred. Phase 3 will route (op path
+          // carries Version only, not VersionedChange; concurrent routing
+          // requires VersionedChange to build a Conflict payload).
           // Do NOT add to seenIds — leave open for re-routing.
           return false;
         }
