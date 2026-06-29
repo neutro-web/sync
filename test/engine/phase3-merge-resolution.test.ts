@@ -546,7 +546,7 @@ describe("C6 · ≥2-replica convergence under fault injection", () => {
 // Cross-lifetime conflict assertion (design §8)
 // ---------------------------------------------------------------------------
 
-describe("§8 cross-lifetime: durable+ephemeral pair cannot arise for one unit", () => {
+describe("§8 cross-lifetime: durable+ephemeral concurrent pair opens a conflict; merged uses local.lifetime", () => {
   it("a durable write followed by an ephemeral concurrent write does not open a conflict (different lifetime classes route to different maps, winner is by version)", async () => {
     // Under current routing: _applyState compares the incoming version against
     // _stateWinner(durable, ephemeral). If the ephemeral and durable are both
