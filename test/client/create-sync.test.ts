@@ -220,7 +220,7 @@ describe("G2-5: auto-resolution and manual opt-out", () => {
 		expect(snapBeforeResolve[0]?.value).toBe("from-B"); // B's confirmed value unchanged
 
 		// Manually resolve: take-remote lands A's value
-		resolveConflict?.({ decision: "take-remote" });
+		if (resolveConflict) resolveConflict({ decision: "take-remote" });
 
 		const snapAfterResolve = await docB.snapshot();
 		expect(snapAfterResolve.length).toBe(1);
