@@ -25,8 +25,8 @@ import type {
 } from "../../src/core/types.ts";
 import { LWWClockStrategy } from "../../src/strategies/lww.ts";
 import { VectorClockStrategy } from "../../src/strategies/vector-clock.ts";
-import { ChannelSimulator } from "../harness/channel-simulator.ts";
 import type { FaultConfig } from "../harness/channel-simulator.ts";
+import { drainChannels, setupGossip } from "../harness/gossip-harness.ts";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -78,74 +78,6 @@ async function getUnitVersion(
 		(c) => c.unit.key === unit.key && c.kind === "state",
 	);
 	return change?.kind === "state" ? change.version : undefined;
-}
-
-/**
- * Wire N engines in a full gossip mesh via ChannelSimulator.
- * Returns { allChannels, drainChannels, throwIfErrors }.
- */
-function setupGossip(
-	engines: Engine[],
-	scope: Scope,
-	baseSeed: number,
-	faultConfig?: FaultConfig,
-): {
-	channels: Map<string, ChannelSimulator>;
-	allChannels: ChannelSimulator[];
-	throwIfErrors(): void;
-} {
-	const n = engines.length;
-	const channels = new Map<string, ChannelSimulator>();
-	const deliveryErrors: unknown[] = [];
-
-	for (let i = 0; i < n; i++) {
-		for (let j = 0; j < n; j++) {
-			if (i === j) continue;
-			channels.set(
-				`${i}→${j}`,
-				new ChannelSimulator(baseSeed + i * 100 + j, faultConfig),
-			);
-		}
-	}
-
-	for (let i = 0; i < n; i++) {
-		const ci = i;
-		// biome-ignore lint/style/noNonNullAssertion: i < n === engines.length
-		engines[i]!.subscribe(scope, {
-			onBatch: (batch) => {
-				for (let j = 0; j < n; j++) {
-					if (j === ci) continue;
-					// biome-ignore lint/style/noNonNullAssertion: channel created for all i≠j pairs
-					channels.get(`${ci}→${j}`)!.enqueue(batch, (b) => {
-						// biome-ignore lint/style/noNonNullAssertion: j < n === engines.length
-						engines[j]!.apply(b).catch((err) => deliveryErrors.push(err));
-					});
-				}
-			},
-			onConflict: () => ({ decision: "defer" as const }),
-		});
-	}
-
-	return {
-		channels,
-		allChannels: Array.from(channels.values()),
-		throwIfErrors(): void {
-			if (deliveryErrors.length > 0) throw deliveryErrors[0];
-		},
-	};
-}
-
-async function drainChannels(
-	channels: ChannelSimulator[],
-	maxRounds = 200,
-): Promise<void> {
-	for (let round = 0; round < maxRounds; round++) {
-		let delivered = 0;
-		for (const ch of channels) delivered += ch.drain();
-		await Promise.resolve();
-		if (delivered === 0) return;
-	}
-	throw new Error(`drainChannels: did not quiesce after ${maxRounds} rounds`);
 }
 
 // ---------------------------------------------------------------------------

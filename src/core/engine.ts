@@ -439,26 +439,10 @@ export class Engine implements Feed, ScopeRouter {
 			scopeState.openConflicts.delete(unit.key);
 			scopeState.seenIds.add(open.local.id.value);
 			scopeState.seenIds.add(open.remote.id.value);
-			if (mergedChange.lifetime.class === "durable") {
-				scopeState.durableStateUnits.set(unit.key, { change: mergedChange });
-				scopeState.cursorSeq++;
-				scopeState.durableLog.push({
-					change: mergedChange,
-					seq: scopeState.cursorSeq,
-				});
-			} else {
-				scopeState.ephemeralStateUnits.set(unit.key, { change: mergedChange });
-			}
-			const outBatch: ChangeBatch = {
-				scope,
-				changes: [mergedChange],
-				...(mergedChange.lifetime.class === "durable"
-					? { cursor: makeCursor(scope, scopeState.cursorSeq) }
-					: {}),
-			};
-			for (const handlers of scopeState.subs) {
-				handlers.onBatch(outBatch);
-			}
+			scopeState.openConflicts.delete(unit.key);
+			scopeState.seenIds.add(open.local.id.value);
+			scopeState.seenIds.add(open.remote.id.value);
+			this._landChange(mergedChange, scopeState, scope, unit.key);
 			return;
 		}
 
@@ -474,24 +458,32 @@ export class Engine implements Feed, ScopeRouter {
 		}
 
 		// take-remote: land the remote change directly into the confirmed maps.
-		const winnerChange = open.remote as StateChange;
+		this._landChange(open.remote as StateChange, scopeState, scope, unit.key);
+	}
 
-		if (winnerChange.lifetime.class === "durable") {
-			scopeState.durableStateUnits.set(unit.key, { change: winnerChange });
+	// ---- Private ------------------------------------------------------------
+
+	/**
+	 * Write a resolved StateChange to the confirmed maps and fire onBatch.
+	 * Shared by the merged and take-remote arms of resolveConflict.
+	 */
+	private _landChange(
+		change: StateChange,
+		scopeState: ScopeState,
+		scope: Scope,
+		unitKey: string,
+	): void {
+		if (change.lifetime.class === "durable") {
+			scopeState.durableStateUnits.set(unitKey, { change });
 			scopeState.cursorSeq++;
-			scopeState.durableLog.push({
-				change: winnerChange,
-				seq: scopeState.cursorSeq,
-			});
+			scopeState.durableLog.push({ change, seq: scopeState.cursorSeq });
 		} else {
-			scopeState.ephemeralStateUnits.set(unit.key, { change: winnerChange });
+			scopeState.ephemeralStateUnits.set(unitKey, { change });
 		}
-
-		// Notify subscriptions so gossip wiring propagates the winning value.
 		const outBatch: ChangeBatch = {
 			scope,
-			changes: [winnerChange],
-			...(winnerChange.lifetime.class === "durable"
+			changes: [change],
+			...(change.lifetime.class === "durable"
 				? { cursor: makeCursor(scope, scopeState.cursorSeq) }
 				: {}),
 		};
@@ -499,8 +491,6 @@ export class Engine implements Feed, ScopeRouter {
 			handlers.onBatch(outBatch);
 		}
 	}
-
-	// ---- Private ------------------------------------------------------------
 
 	private _getOrCreateScope(scope: Scope): ScopeState {
 		const key = scope.key;
