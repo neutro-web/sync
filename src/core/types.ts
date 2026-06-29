@@ -1,5 +1,5 @@
 /**
- * @neutro/sync — Seam Contract types (v1.0)
+ * @neutro/sync — Seam Contract types (v1.1)
  *
  * Derived from docs/seam-contract.md §1–§8. This file is the TypeScript
  * expression of the frozen seam. Nothing here is domain-specific.
@@ -169,6 +169,14 @@ export interface Resolver<V = unknown> {
 export interface ClockStrategy {
   mint(prev?: Version): Version;
   compare(a: Version, b: Version): "before" | "after" | "concurrent";
+  /**
+   * Return a version that causally dominates BOTH `a` and `b` and is
+   * `compare`-equal across all replicas that call `mergeVersions(a, b)`.
+   * Required by the `merged` resolution arm; omit on strategies where
+   * `compare` never returns `"concurrent"` (e.g. LWW).
+   * Seam contract v1.1 addition.
+   */
+  mergeVersions?(a: Version, b: Version): Version;
 }
 
 // ---------------------------------------------------------------------------

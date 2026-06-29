@@ -125,7 +125,7 @@ interface Version {
   readonly [VersionBrand]: true;
 }
 
-/** The pluggability slot for versioning. The whole generality lives in `compare`. */
+/** The pluggability slot for versioning. The whole generality lives in `compare`. (v1.1) */
 interface ClockStrategy {
   /** Mint a version for a new local state-change. */
   mint(prev?: Version): Version;
@@ -136,6 +136,14 @@ interface ClockStrategy {
    *  - CRDT:   version = vector/position; "concurrent" is the common case.
    */
   compare(a: Version, b: Version): "before" | "after" | "concurrent";
+  /**
+   * (v1.1) Mint a version that causally dominates both `a` and `b`, identical
+   * across replicas. Required when `compare` can return `"concurrent"` and the
+   * consumer uses `merged` resolutions. Omit on strategies where `compare`
+   * never returns `"concurrent"` (e.g. LWW — `merged` is unreachable there).
+   * The engine throws if `mergeVersions` is absent and `merged` is requested.
+   */
+  mergeVersions?(a: Version, b: Version): Version;
 }
 ```
 
@@ -288,6 +296,8 @@ interface Resolver<V = unknown> {
 > **Anti-leak boundary:** `local.value` is `unknown` to `ns`. The payload is the question, never a hint at the answer — the engine does not tag a conflict with a suspected policy.
 
 > **Convergence expectation (v1.0 stated requirement):** Under *local* (non-propagated) resolution — where each replica runs `Resolver.resolve()` independently — a `Resolver` MUST be a **deterministic pure function** of its `Conflict` input: given the same `(local, remote, base?, scope)`, every replica must reach the same `Resolution`. A non-deterministic local resolver diverges silently; the engine cannot detect this. Propagated resolution (gossiping the decision as a change so all replicas apply the same winner) lifts this requirement and is a Phase 3 concern. This is a constraint on resolver *implementations*, not on the `Resolver` type surface — `types.ts` is unchanged.
+
+> **`merged` requires `mergeVersions` (v1.1):** A resolver returning `{ decision: "merged" }` requires the active `ClockStrategy` to implement `mergeVersions`. The engine throws a precise error if it does not. The merged version produced by `mergeVersions(local.version, remote.version)` must (a) dominate both inputs under `compare`, and (b) be `compare`-equal across all replicas that call `mergeVersions` on the same pair — guaranteed for vector clock by the causal-join (max-only) rule. This is the contract that prevents merged changes from re-conflicting on gossip redelivery.
 
 ---
 
