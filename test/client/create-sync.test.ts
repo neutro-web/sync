@@ -122,7 +122,9 @@ describe("G2-5: auto-resolution and manual opt-out", () => {
 	// Deterministic resolver: pick the lexicographically higher value to ensure
 	// both replicas converge to the same winner regardless of which side is "local"
 	const alphabetResolver = {
-		resolve(c: import("../../src/core/types.ts").Conflict): import("../../src/core/types.ts").Resolution {
+		resolve(
+			c: import("../../src/core/types.ts").Conflict,
+		): import("../../src/core/types.ts").Resolution {
 			const local = c.local.value as string;
 			const remote = c.remote.value as string;
 			return local >= remote
@@ -195,7 +197,9 @@ describe("G2-5: auto-resolution and manual opt-out", () => {
 			manual: true,
 		});
 
-		let resolveConflict: ((r: import("../../src/core/types.ts").Resolution) => void) | null = null;
+		let resolveConflict:
+			| ((r: import("../../src/core/types.ts").Resolution) => void)
+			| null = null;
 		docB.onConflict((_conflict, resolve) => {
 			resolveConflict = resolve;
 			// Do NOT resolve immediately — leave conflict open
