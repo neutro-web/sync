@@ -121,7 +121,9 @@ describe("G2-3: vanilla end-to-end sync", () => {
 describe("G2-4: per-scope config isolation", () => {
 	// Deterministic resolver: lexicographically higher value wins on both replicas
 	const alphabetResolver4 = {
-		resolve(c: import("../../src/core/types.ts").Conflict): import("../../src/core/types.ts").Resolution {
+		resolve(
+			c: import("../../src/core/types.ts").Conflict,
+		): import("../../src/core/types.ts").Resolution {
 			const local = c.local.value as string;
 			const remote = c.remote.value as string;
 			return local >= remote
@@ -145,14 +147,22 @@ describe("G2-4: per-scope config isolation", () => {
 		// VC scope: auto-resolver tracks whether it was invoked (proving resolver fired)
 		let resolverInvokeCount = 0;
 		const trackingResolver = {
-			resolve(c: import("../../src/core/types.ts").Conflict): import("../../src/core/types.ts").Resolution {
+			resolve(
+				c: import("../../src/core/types.ts").Conflict,
+			): import("../../src/core/types.ts").Resolution {
 				resolverInvokeCount++;
 				return alphabetResolver4.resolve(c);
 			},
 		};
 
-		syncA.scope("vc-scope", { strategy: vectorClock("vc-a"), resolver: trackingResolver });
-		const vcB = syncB.scope("vc-scope", { strategy: vectorClock("vc-b"), resolver: trackingResolver });
+		syncA.scope("vc-scope", {
+			strategy: vectorClock("vc-a"),
+			resolver: trackingResolver,
+		});
+		const vcB = syncB.scope("vc-scope", {
+			strategy: vectorClock("vc-b"),
+			resolver: trackingResolver,
+		});
 
 		// LWW scope: manual mode to detect if onConflict ever fires (it must not)
 		syncA.scope("lww-scope", { strategy: lww(0), manual: true });
