@@ -287,6 +287,8 @@ interface Resolver<V = unknown> {
 
 > **Anti-leak boundary:** `local.value` is `unknown` to `ns`. The payload is the question, never a hint at the answer — the engine does not tag a conflict with a suspected policy.
 
+> **Convergence expectation (v1.0 stated requirement):** Under *local* (non-propagated) resolution — where each replica runs `Resolver.resolve()` independently — a `Resolver` MUST be a **deterministic pure function** of its `Conflict` input: given the same `(local, remote, base?, scope)`, every replica must reach the same `Resolution`. A non-deterministic local resolver diverges silently; the engine cannot detect this. Propagated resolution (gossiping the decision as a change so all replicas apply the same winner) lifts this requirement and is a Phase 3 concern. This is a constraint on resolver *implementations*, not on the `Resolver` type surface — `types.ts` is unchanged.
+
 ---
 
 ## 6. `Scope` — partition key for subscription
