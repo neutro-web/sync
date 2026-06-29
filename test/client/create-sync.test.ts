@@ -357,3 +357,101 @@ describe("G2-4: per-scope config isolation", () => {
 		sync.close();
 	});
 });
+
+// ─── G2-6: No Cursor reaches the consumer ────────────────────────────────────
+
+describe("G2-6: no cursor reaches the consumer", () => {
+	test("subscribe callbacks receive Change[], not ChangeBatch (no cursor property)", async () => {
+		const [tA, tB] = InProcessTransport.pair();
+		const syncA = createSync({ transport: tA });
+		const syncB = createSync({ transport: tB });
+
+		const docA = syncA.scope("doc", { strategy: vectorClock("cur-a") });
+		const docB = syncB.scope("doc", { strategy: vectorClock("cur-b") });
+
+		const callbackArgs: unknown[] = [];
+		docB.subscribe((changes) => {
+			callbackArgs.push(changes);
+			// changes is typed as readonly Change[] — verify at runtime too
+			expect(Array.isArray(changes)).toBe(true);
+			// A ChangeBatch would have a `.cursor` property; Change[] does not
+			expect((changes as Record<string, unknown>)["cursor"]).toBeUndefined();
+		});
+
+		docA.set("k1", "v1");
+		docA.set("k2", "v2");
+		docA.set("k3", "v3");
+
+		expect(callbackArgs.length).toBeGreaterThan(0);
+		for (const arg of callbackArgs) {
+			expect(Array.isArray(arg)).toBe(true);
+			expect((arg as Record<string, unknown>)["cursor"]).toBeUndefined();
+		}
+
+		syncA.close();
+		syncB.close();
+	});
+
+	test("snapshot() returns readonly Change[], not a ChangeBatch (no cursor property)", async () => {
+		const [tA, tB] = InProcessTransport.pair();
+		const syncA = createSync({ transport: tA });
+		const syncB = createSync({ transport: tB });
+
+		syncA.scope("doc-snap", { strategy: vectorClock("snap-a") }).set("x", 1);
+		const docB = syncB.scope("doc-snap", { strategy: vectorClock("snap-b") });
+
+		const snap = await docB.snapshot();
+
+		expect(Array.isArray(snap)).toBe(true);
+		expect((snap as Record<string, unknown>)["cursor"]).toBeUndefined();
+
+		syncA.close();
+		syncB.close();
+	});
+
+	test("reconnect replay does not expose cursor to consumer subscribers", async () => {
+		// Set up A with changes already written, B starts disconnected
+		const tA = new InProcessTransport();
+		const tB = new InProcessTransport();
+		// Wire directly (no simulator)
+		tA.channelFn = (batch) => tB._deliver(batch);
+		tB.channelFn = (batch) => tA._deliver(batch);
+
+		const syncA = createSync({ transport: tA });
+		const docA = syncA.scope("doc-reconnect", {
+			strategy: vectorClock("rc-a"),
+		});
+
+		const syncB = createSync({ transport: tB });
+		const docB = syncB.scope("doc-reconnect", {
+			strategy: vectorClock("rc-b"),
+		});
+
+		const bCallbackArgs: unknown[] = [];
+		docB.subscribe((changes) => {
+			bCallbackArgs.push(changes);
+			expect((changes as Record<string, unknown>)["cursor"]).toBeUndefined();
+		});
+
+		// Connect A first — A's onConnect fires, replays (nothing yet since no changes)
+		tA._setConnected(true);
+
+		// A writes 3 changes while both are "connected"
+		docA.set("p1", "v1");
+		docA.set("p2", "v2");
+		docA.set("p3", "v3");
+
+		// Simulate B reconnecting — B's onConnect fires, B replays its (empty) state
+		tB._setConnected(false);
+		tB._setConnected(true);
+
+		// Verify all callbacks received arrays, never a ChangeBatch
+		for (const arg of bCallbackArgs) {
+			expect(Array.isArray(arg)).toBe(true);
+			expect((arg as Record<string, unknown>)["cursor"]).toBeUndefined();
+		}
+
+		syncA.close();
+		syncB.close();
+	});
+});
