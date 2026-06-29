@@ -116,6 +116,131 @@ describe("G2-3: vanilla end-to-end sync", () => {
 	});
 });
 
+// ─── G2-5: Auto-resolution default + manual opt-out ──────────────────────────
+
+describe("G2-5: auto-resolution and manual opt-out", () => {
+	// Deterministic resolver: pick the lexicographically higher value to ensure
+	// both replicas converge to the same winner regardless of which side is "local"
+	const alphabetResolver = {
+		resolve(c: import("../../src/core/types.ts").Conflict): import("../../src/core/types.ts").Resolution {
+			const local = c.local.value as string;
+			const remote = c.remote.value as string;
+			return local >= remote
+				? { decision: "take-local" as const }
+				: { decision: "take-remote" as const };
+		},
+	};
+
+	test("G2-5a: auto-resolution (resolver + no manual flag) — both replicas converge", async () => {
+		const buffA: import("../../src/core/types.ts").ChangeBatch[] = [];
+		const buffB: import("../../src/core/types.ts").ChangeBatch[] = [];
+		const tA = new InProcessTransport();
+		const tB = new InProcessTransport();
+		tA.channelFn = (batch) => buffA.push(batch);
+		tB.channelFn = (batch) => buffB.push(batch);
+
+		const syncA = createSync({ transport: tA });
+		const syncB = createSync({ transport: tB });
+
+		const docA = syncA.scope("doc", {
+			strategy: vectorClock("auto-a"),
+			resolver: alphabetResolver,
+			// manual defaults to false → ResolverPump created automatically
+		});
+		const docB = syncB.scope("doc", {
+			strategy: vectorClock("auto-b"),
+			resolver: alphabetResolver,
+		});
+
+		// Concurrent writes (buffered, not yet delivered)
+		docA.set("para", "value-A");
+		docB.set("para", "value-B");
+
+		// Deliver A's write to B → B detects concurrent → auto-resolver fires → B converges
+		for (const b of buffA.splice(0)) tB._deliver(b);
+
+		// Deliver B's write to A → A detects concurrent → auto-resolver fires → A converges
+		for (const b of buffB.splice(0)) tA._deliver(b);
+
+		// Both should now have the same winning value
+		// alphabetResolver picks "value-B" >= "value-A" → take-local on B (B's value wins),
+		// take-remote on A (A receives B's value as remote) → both land "value-B"
+		const snapA = await docA.snapshot();
+		const snapB = await docB.snapshot();
+
+		expect(snapA.length).toBe(1);
+		expect(snapB.length).toBe(1);
+		expect(snapA[0]?.value).toBe(snapB[0]?.value); // both replicas converge
+
+		syncA.close();
+		syncB.close();
+	});
+
+	test("G2-5b: manual opt-out — conflict stays open until explicit resolve()", async () => {
+		const buffA: import("../../src/core/types.ts").ChangeBatch[] = [];
+		const tA = new InProcessTransport();
+		const tB = new InProcessTransport();
+		tA.channelFn = (batch) => buffA.push(batch);
+		tB.channelFn = () => {}; // B's sends go nowhere in this test
+
+		const syncA = createSync({ transport: tA });
+		const syncB = createSync({ transport: tB });
+
+		const docA = syncA.scope("doc-manual", {
+			strategy: vectorClock("manual-a"),
+			manual: true,
+		});
+		const docB = syncB.scope("doc-manual", {
+			strategy: vectorClock("manual-b"),
+			manual: true,
+		});
+
+		let resolveConflict: ((r: import("../../src/core/types.ts").Resolution) => void) | null = null;
+		docB.onConflict((_conflict, resolve) => {
+			resolveConflict = resolve;
+			// Do NOT resolve immediately — leave conflict open
+		});
+
+		// Concurrent writes
+		docA.set("field", "from-A");
+		docB.set("field", "from-B");
+
+		// Deliver A's write to B → conflict detected, handler called, but NOT resolved
+		for (const b of buffA.splice(0)) tB._deliver(b);
+
+		expect(resolveConflict).not.toBeNull();
+
+		// Conflict open: snapshot shows last-confirmed-winner (B's own write, which was confirmed first)
+		const snapBeforeResolve = await docB.snapshot();
+		expect(snapBeforeResolve.length).toBe(1);
+		expect(snapBeforeResolve[0]?.value).toBe("from-B"); // B's confirmed value unchanged
+
+		// Manually resolve: take-remote lands A's value
+		resolveConflict?.({ decision: "take-remote" });
+
+		const snapAfterResolve = await docB.snapshot();
+		expect(snapAfterResolve.length).toBe(1);
+		expect(snapAfterResolve[0]?.value).toBe("from-A"); // A's value now confirmed on B
+
+		syncA.close();
+		syncB.close();
+	});
+
+	test("onConflict() throws when scope is not manual", () => {
+		const [t] = InProcessTransport.pair();
+		const sync = createSync({ transport: t });
+		const handle = sync.scope("doc-auto", { strategy: vectorClock("x") });
+
+		expect(() =>
+			handle.onConflict(() => {
+				// should not be reachable
+			}),
+		).toThrow(/manual: true/);
+
+		sync.close();
+	});
+});
+
 // ─── G2-4: Per-scope config isolation ────────────────────────────────────────
 
 describe("G2-4: per-scope config isolation", () => {
