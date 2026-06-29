@@ -1,4 +1,4 @@
-import { describe, expectTypeOf, test } from "vitest";
+import { describe, expect, expectTypeOf, test } from "vitest";
 import type {
 	ScopeHandle,
 	SyncClient,
@@ -14,6 +14,14 @@ import type {
 	Subscription,
 	Transport,
 } from "../../src/core/types.ts";
+import type {
+	Change as BarrelChange,
+	Conflict as BarrelConflict,
+	Lifetime as BarrelLifetime,
+	Resolution as BarrelResolution,
+	Subscription as BarrelSubscription,
+	Transport as BarrelTransport,
+} from "../../src/index.ts";
 
 describe("ScopeHandle type surface", () => {
 	test("set() returns void", () => {
@@ -83,5 +91,32 @@ describe("WriteOpts type surface", () => {
 
 	test("unitKey is optional string", () => {
 		expectTypeOf<WriteOpts["unitKey"]>().toEqualTypeOf<string | undefined>();
+	});
+});
+
+describe("barrel primitive type exports", () => {
+	test("Change, Conflict, Lifetime, Resolution, Subscription, Transport are barrel-exported", () => {
+		// Type-level test: if this compiles, the barrel exports these types correctly.
+		// Runtime value is unused; the assertion is purely compile-time.
+		const _change: BarrelChange = undefined as unknown as BarrelChange;
+		const _conflict: BarrelConflict = undefined as unknown as BarrelConflict;
+		const _lifetime: BarrelLifetime = { class: "durable" };
+		const _resolution: BarrelResolution = { decision: "take-local" };
+		const _sub: BarrelSubscription = { unsubscribe: () => {} };
+		const _transport: BarrelTransport = undefined as unknown as BarrelTransport;
+		expectTypeOf(_change).toMatchTypeOf<BarrelChange>();
+		expectTypeOf(_conflict).toMatchTypeOf<BarrelConflict>();
+		expectTypeOf(_lifetime).toMatchTypeOf<BarrelLifetime>();
+		expectTypeOf(_resolution).toMatchTypeOf<BarrelResolution>();
+		expectTypeOf(_sub).toMatchTypeOf<BarrelSubscription>();
+		expectTypeOf(_transport).toMatchTypeOf<BarrelTransport>();
+		// Verify Change and Conflict from barrel match core types
+		expectTypeOf<BarrelChange>().toEqualTypeOf<Change>();
+		expectTypeOf<BarrelConflict>().toEqualTypeOf<Conflict>();
+		expectTypeOf<BarrelLifetime>().toEqualTypeOf<Lifetime>();
+		expectTypeOf<BarrelResolution>().toEqualTypeOf<Resolution>();
+		expectTypeOf<BarrelSubscription>().toEqualTypeOf<Subscription>();
+		expectTypeOf<BarrelTransport>().toEqualTypeOf<Transport>();
+		expect(true).toBe(true); // ensure test registers as pass
 	});
 });

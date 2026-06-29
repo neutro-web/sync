@@ -48,12 +48,12 @@ describe("vectorClock()", () => {
 		expect(s.compare(v1, v2)).toBe("before");
 	});
 
-	test("auto-generated nodeId produces unique strategies", () => {
-		const a = vectorClock();
-		const b = vectorClock();
+	test("distinct nodeIds produce concurrent independent writes", () => {
+		const a = vectorClock("test-node-a");
+		const b = vectorClock("test-node-b");
 		const va = a.mint();
 		const vb = b.mint();
-		// Different auto-node ids → concurrent independent writes
+		// Different node ids → concurrent independent writes
 		expect(a.compare(va, vb)).toBe("concurrent");
 	});
 

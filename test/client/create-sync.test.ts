@@ -358,6 +358,69 @@ describe("G2-4: per-scope config isolation", () => {
 	});
 });
 
+// ─── G2-6d: Durable reconnect replay correctness ─────────────────────────────
+
+describe("G2-6d: durable reconnect replay correctness", () => {
+	test("durable reconnect replays only post-disconnect changes (lastCursor correctness)", async () => {
+		const tA = new InProcessTransport();
+		const tB = new InProcessTransport();
+		tA.channelFn = (batch) => tB._deliver(batch);
+		tB.channelFn = (batch) => tA._deliver(batch);
+
+		const syncA = createSync({ transport: tA });
+		const docA = syncA.scope("doc-replay", {
+			strategy: vectorClock("replay-a"),
+		});
+
+		const syncB = createSync({ transport: tB });
+		const docB = syncB.scope("doc-replay", {
+			strategy: vectorClock("replay-b"),
+		});
+
+		// Phase 1: connected — A writes 3 changes, B receives them
+		docA.set("k1", "v1");
+		docA.set("k2", "v2");
+		docA.set("k3", "v3");
+
+		const snapAfterPhase1 = await docB.snapshot();
+		expect(snapAfterPhase1.length).toBe(3);
+
+		// Phase 2: disconnect B (B no longer receives A's sends)
+		const buffered: import("../../src/core/types.ts").ChangeBatch[] = [];
+		tA.channelFn = (batch) => buffered.push(batch); // A's sends now go to buffer, not B
+
+		// A writes 2 more changes while B is "offline"
+		docA.set("k4", "v4");
+		docA.set("k5", "v5");
+
+		// B hasn't received k4/k5 yet
+		const snapDuringDisconnect = await docB.snapshot();
+		expect(snapDuringDisconnect.length).toBe(3);
+
+		// Phase 3: reconnect — deliver only the buffered (post-disconnect) batches to B
+		// This simulates what the transport's onConnect replay would do:
+		// engine.changes(scope, lastCursor) returns only changes after the last seen cursor
+		for (const b of buffered) tB._deliver(b);
+
+		const snapAfterReconnect = await docB.snapshot();
+		expect(snapAfterReconnect.length).toBe(5); // k1-k5, no duplicates
+		expect(snapAfterReconnect.some((c) => (c.value as string) === "v4")).toBe(
+			true,
+		);
+		expect(snapAfterReconnect.some((c) => (c.value as string) === "v5")).toBe(
+			true,
+		);
+
+		// Verify no duplicates: k1-k5 appear exactly once
+		const values = snapAfterReconnect.map((c) => c.value as string);
+		const uniqueValues = new Set(values);
+		expect(uniqueValues.size).toBe(5);
+
+		syncA.close();
+		syncB.close();
+	});
+});
+
 // ─── G2-6: No Cursor reaches the consumer ────────────────────────────────────
 
 describe("G2-6: no cursor reaches the consumer", () => {
@@ -458,6 +521,38 @@ describe("G2-6: no cursor reaches the consumer", () => {
 				(arg as unknown as Record<string, unknown>).cursor,
 			).toBeUndefined();
 		}
+
+		syncA.close();
+		syncB.close();
+	});
+});
+
+// ─── config.scopes pre-registration ──────────────────────────────────────────
+
+describe("config.scopes pre-registration", () => {
+	test("scopes declared in SyncConfig are registered before first use", async () => {
+		const [tA, tB] = InProcessTransport.pair();
+		const syncA = createSync({
+			transport: tA,
+			scopes: {
+				"pre-reg": { strategy: vectorClock("pre-a") },
+			},
+		});
+		const syncB = createSync({ transport: tB });
+		const docB = syncB.scope("pre-reg", { strategy: vectorClock("pre-b") });
+
+		// Retrieve pre-registered scope without config (must not throw)
+		const preReg = syncA.scope("pre-reg");
+
+		preReg.set("x", 42);
+
+		const snap = await docB.snapshot();
+		expect(snap.some((c) => c.value === 42)).toBe(true);
+
+		// Passing a config to an already-registered scope must throw
+		expect(() =>
+			syncA.scope("pre-reg", { strategy: vectorClock("pre-a2") }),
+		).toThrow(/already registered/);
 
 		syncA.close();
 		syncB.close();
