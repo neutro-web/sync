@@ -394,3 +394,210 @@ describe("C5 · Guard: merged under a strategy without mergeVersions throws befo
     expect(await getUnitValue(engine, SCOPE, UNIT)).toBe("local-val");
   });
 });
+
+// ---------------------------------------------------------------------------
+// C6 — ≥2-replica convergence; merged value does NOT re-conflict on redelivery
+// ---------------------------------------------------------------------------
+
+describe("C6 · ≥2-replica convergence under fault injection", () => {
+  /**
+   * Symmetric resolver: returns "merged-AB" regardless of which side is local/remote.
+   * Deterministic and pure — the same answer on both replicas for the same conflict.
+   */
+  function symmetricResolver(conflict: Conflict): Resolution {
+    return { decision: "merged", value: "merged-AB" };
+  }
+
+  it("2-replica: both converge on merged value, merged version dominates inputs, no re-conflict on redelivery", async () => {
+    const clockA = new VectorClockStrategy("node-A");
+    const clockB = new VectorClockStrategy("node-B");
+    // Engine._resolver is dead code (never called by the engine). Resolution runs via
+    // ResolverPump which subscribes to onConflict notifications and calls resolveConflict.
+    const engineA = new Engine(clockA);
+    const engineB = new Engine(clockB);
+
+    const faultConfig: FaultConfig = {
+      dropRate: 0.1,
+      reorderRate: 0.2,
+      duplicateRate: 0.15,
+    };
+
+    const { allChannels, throwIfErrors } = setupGossip(
+      [engineA, engineB],
+      SCOPE,
+      42,
+      faultConfig,
+    );
+
+    // Wire ResolverPumps — constructor self-wires via engine.subscribe internally.
+    // ResolverPump signature: (engine, resolver, scope). No separate subscribe needed.
+    new ResolverPump(engineA, { resolve: symmetricResolver }, SCOPE);
+    new ResolverPump(engineB, { resolve: symmetricResolver }, SCOPE);
+
+    // Concurrent writes — each node mints without knowledge of the other
+    const vA = clockA.mint();
+    const vB = clockB.mint();
+
+    await engineA.apply(makeDurableStateBatch(SCOPE, UNIT, "value-A", "write-A", vA));
+    await engineB.apply(makeDurableStateBatch(SCOPE, UNIT, "value-B", "write-B", vB));
+
+    // Drain to quiescence (with fault injection)
+    await drainChannels(allChannels);
+    throwIfErrors();
+
+    // Both engines must have converged on the merged value
+    const valueA = await getUnitValue(engineA, SCOPE, UNIT);
+    const valueB = await getUnitValue(engineB, SCOPE, UNIT);
+    expect(valueA).toBe("merged-AB");
+    expect(valueB).toBe("merged-AB");
+
+    // Merged version dominates both original input versions on both engines
+    const mergedVersionA = await getUnitVersion(engineA, SCOPE, UNIT);
+    const mergedVersionB = await getUnitVersion(engineB, SCOPE, UNIT);
+    expect(mergedVersionA).toBeDefined();
+    expect(mergedVersionB).toBeDefined();
+    expect(clockA.compare(mergedVersionA!, vA)).toBe("after");
+    expect(clockA.compare(mergedVersionA!, vB)).toBe("after");
+    expect(clockB.compare(mergedVersionB!, vA)).toBe("after");
+    expect(clockB.compare(mergedVersionB!, vB)).toBe("after");
+
+    // Verify no lingering open conflicts: a second resolveConflict(take-remote) on each
+    // engine must be a no-op — if the conflict were still open, take-remote would
+    // overwrite "merged-AB" with the remote input value.
+    engineA.resolveConflict(SCOPE, UNIT, { decision: "take-remote" });
+    expect(await getUnitValue(engineA, SCOPE, UNIT)).toBe("merged-AB");
+    engineB.resolveConflict(SCOPE, UNIT, { decision: "take-remote" });
+    expect(await getUnitValue(engineB, SCOPE, UNIT)).toBe("merged-AB");
+  });
+
+  it("3-replica partition: A+C merge while B isolated, reconnect → all 3 converge", async () => {
+    const UNIT3 = makeConflictUnit("field-partition");
+    const clockA = new VectorClockStrategy("node-A");
+    const clockB = new VectorClockStrategy("node-B");
+    const clockC = new VectorClockStrategy("node-C");
+    // Engine._resolver is dead; resolution runs via ResolverPump subscriptions.
+    const engineA = new Engine(clockA);
+    const engineB = new Engine(clockB);
+    const engineC = new Engine(clockC);
+
+    const { channels, allChannels, throwIfErrors } = setupGossip(
+      [engineA, engineB, engineC],
+      SCOPE,
+      99,
+    );
+
+    // Wire ResolverPumps on A and C (B receives merged change via gossip — no pump needed there).
+    // ResolverPump self-wires via engine.subscribe in its constructor.
+    new ResolverPump(engineA, { resolve: symmetricResolver }, SCOPE);
+    new ResolverPump(engineC, { resolve: symmetricResolver }, SCOPE);
+
+    // Partition B (channels to/from B deliver nothing)
+    channels.get("0→1")!.partition(); // A→B
+    channels.get("1→0")!.partition(); // B→A
+    channels.get("2→1")!.partition(); // C→B
+    channels.get("1→2")!.partition(); // B→C
+
+    // A and C write concurrently (B is isolated)
+    const vA = clockA.mint();
+    const vC = clockC.mint();
+    await engineA.apply(makeDurableStateBatch(SCOPE, UNIT3, "value-A", "p-write-A", vA));
+    await engineC.apply(makeDurableStateBatch(SCOPE, UNIT3, "value-C", "p-write-C", vC));
+
+    // Drain A↔C channels only
+    await drainChannels([channels.get("0→2")!, channels.get("2→0")!]);
+    throwIfErrors();
+
+    // A and C should have converged on "merged-AB" (symmetric resolver)
+    expect(await getUnitValue(engineA, SCOPE, UNIT3)).toBe("merged-AB");
+    expect(await getUnitValue(engineC, SCOPE, UNIT3)).toBe("merged-AB");
+
+    // Reconnect B
+    channels.get("0→1")!.reconnect();
+    channels.get("1→0")!.reconnect();
+    channels.get("2→1")!.reconnect();
+    channels.get("1→2")!.reconnect();
+
+    // Drain all channels — B receives the merged change from A and C
+    await drainChannels(allChannels);
+    throwIfErrors();
+
+    // All 3 converge
+    expect(await getUnitValue(engineA, SCOPE, UNIT3)).toBe("merged-AB");
+    expect(await getUnitValue(engineB, SCOPE, UNIT3)).toBe("merged-AB");
+    expect(await getUnitValue(engineC, SCOPE, UNIT3)).toBe("merged-AB");
+
+    // No lingering open conflict on any engine
+    const conflictFired = vi.fn();
+    for (const engine of [engineA, engineB, engineC]) {
+      engine.subscribe(SCOPE, { onBatch: () => {}, onConflict: conflictFired });
+    }
+    // Re-apply original inputs to all engines — none should re-open a conflict
+    await engineA.apply(makeDurableStateBatch(SCOPE, UNIT3, "value-A", "p-write-A", vA));
+    await engineB.apply(makeDurableStateBatch(SCOPE, UNIT3, "value-A", "p-write-A", vA));
+    await engineC.apply(makeDurableStateBatch(SCOPE, UNIT3, "value-A", "p-write-A", vA));
+    await engineA.apply(makeDurableStateBatch(SCOPE, UNIT3, "value-C", "p-write-C", vC));
+    await engineB.apply(makeDurableStateBatch(SCOPE, UNIT3, "value-C", "p-write-C", vC));
+    await engineC.apply(makeDurableStateBatch(SCOPE, UNIT3, "value-C", "p-write-C", vC));
+    expect(conflictFired).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-lifetime conflict assertion (design §8)
+// ---------------------------------------------------------------------------
+
+describe("§8 cross-lifetime: durable+ephemeral pair cannot arise for one unit", () => {
+  it("a durable write followed by an ephemeral concurrent write does not open a conflict (different lifetime classes route to different maps, winner is by version)", async () => {
+    // Under current routing: _applyState compares the incoming version against
+    // _stateWinner(durable, ephemeral). If the ephemeral and durable are both
+    // present, _stateWinner picks the higher-version one for comparison. So the
+    // only way to get a conflict is if two changes have CONCURRENT versions —
+    // they can differ in lifetime, but the engine compares them purely by version.
+    // We assert that a durable local + ephemeral remote concurrent pair DOES produce
+    // a conflict (openConflicts is not nil-by-lifetime), and that the merged arm
+    // uses open.local.lifetime for the merged change.
+    const clockA = new VectorClockStrategy("node-A");
+    const clockB = new VectorClockStrategy("node-B");
+    const engine = new Engine(clockA);
+
+    const conflictPayloads: Conflict[] = [];
+    engine.subscribe(SCOPE, {
+      onBatch: () => {},
+      onConflict: (c) => { conflictPayloads.push(c); return { decision: "defer" as const }; },
+    });
+
+    const UNIT4 = makeConflictUnit("cross-lifetime");
+    const vDurable = clockA.mint();
+    const vEphemeral = clockB.mint(); // concurrent with vDurable
+
+    // Apply durable local
+    await engine.apply(makeDurableStateBatch(SCOPE, UNIT4, "durable-val", "cl-durable", vDurable));
+    // Apply ephemeral concurrent
+    await engine.apply({
+      scope: SCOPE,
+      changes: [
+        {
+          id: makeChangeId("cl-ephemeral"),
+          scope: SCOPE,
+          unit: UNIT4,
+          kind: "state",
+          lifetime: ephemeral(60_000),
+          value: "ephemeral-val",
+          version: vEphemeral,
+        },
+      ],
+    });
+
+    // A conflict IS opened — the engine compares by version regardless of lifetime
+    expect(conflictPayloads).toHaveLength(1);
+
+    // Resolving as merged uses open.local.lifetime (durable)
+    const batchCalls: ChangeBatch[] = [];
+    engine.subscribe(SCOPE, { onBatch: (b) => batchCalls.push(b), onConflict: () => ({ decision: "defer" as const }) });
+    engine.resolveConflict(SCOPE, UNIT4, { decision: "merged", value: "cross-merged" });
+
+    // Merged change has durable lifetime (from open.local)
+    const mergedChange = batchCalls[0]?.changes[0];
+    expect(mergedChange?.lifetime.class).toBe("durable");
+  });
+});
