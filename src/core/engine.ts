@@ -47,6 +47,7 @@
 
 import {
   makeCursor,
+  makeChangeId,
   type Feed,
   type ScopeRouter,
   type ClockStrategy,
@@ -372,7 +373,9 @@ export class Engine implements Feed, ScopeRouter {
    *   redelivery cannot re-open the conflict. No state change, no onBatch.
    * - `take-remote`: lands the remote change directly into the confirmed maps,
    *   advances cursor (if durable), fires onBatch.
-   * - `merged`: NOT supported in Phase 2. Throws explicitly.
+   * - `merged`: mints a merged version via `ClockStrategy.mergeVersions`, lands merged value
+   *   in the confirmed maps, advances cursor (if durable), fires onBatch. Throws if the
+   *   active strategy lacks `mergeVersions`.
    * - `defer`: no-op — conflict stays open.
    *
    * Calling resolveConflict on a unit with no open conflict is a no-op.
@@ -396,10 +399,45 @@ export class Engine implements Feed, ScopeRouter {
     if (resolution.decision === "defer") return; // conflict stays open
 
     if (resolution.decision === "merged") {
-      throw new Error(
-        "resolveConflict: 'merged' is not supported in Phase 2. " +
-          "Use take-local, take-remote, or defer.",
+      if (!this._clock.mergeVersions) {
+        throw new Error(
+          "resolveConflict: strategy does not implement mergeVersions; 'merged' resolution is unsupported",
+        );
+      }
+      const mergedVersion = this._clock.mergeVersions(
+        open.local.version,
+        open.remote.version,
       );
+      const mergedChange: StateChange = {
+        id: makeChangeId(`merged:${open.local.id.value}:${open.remote.id.value}`),
+        kind: "state",
+        scope,
+        unit,
+        value: resolution.value,
+        version: mergedVersion,
+        lifetime: open.local.lifetime,
+      };
+      scopeState.openConflicts.delete(unit.key);
+      scopeState.seenIds.add(open.local.id.value);
+      scopeState.seenIds.add(open.remote.id.value);
+      if (mergedChange.lifetime.class === "durable") {
+        scopeState.durableStateUnits.set(unit.key, { change: mergedChange });
+        scopeState.cursorSeq++;
+        scopeState.durableLog.push({ change: mergedChange, seq: scopeState.cursorSeq });
+      } else {
+        scopeState.ephemeralStateUnits.set(unit.key, { change: mergedChange });
+      }
+      const outBatch: ChangeBatch = {
+        scope,
+        changes: [mergedChange],
+        ...(mergedChange.lifetime.class === "durable"
+          ? { cursor: makeCursor(scope, scopeState.cursorSeq) }
+          : {}),
+      };
+      for (const handlers of scopeState.subs) {
+        handlers.onBatch(outBatch);
+      }
+      return;
     }
 
     scopeState.openConflicts.delete(unit.key);

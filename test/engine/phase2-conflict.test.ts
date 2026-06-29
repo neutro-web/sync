@@ -270,10 +270,20 @@ describe("Q5 · defer: conflict stays open, state unchanged, subsequent resoluti
     ).not.toThrow();
   });
 
-  it("resolveConflict with decision 'merged' throws before any state mutation", async () => {
+  it("resolveConflict with decision 'merged' throws when strategy lacks mergeVersions", async () => {
+    // Use a minimal clock that can produce concurrent but lacks mergeVersions
     const clockA = new VectorClockStrategy("A");
     const clockB = new VectorClockStrategy("B");
-    const engine = new Engine(clockA);
+    const minimalClock: import("../../src/core/types.ts").ClockStrategy = {
+      mint(prev?: import("../../src/core/types.ts").Version) {
+        return clockA.mint(prev);
+      },
+      compare(a: import("../../src/core/types.ts").Version, b: import("../../src/core/types.ts").Version) {
+        return clockA.compare(a, b);
+      },
+      // mergeVersions intentionally absent
+    };
+    const engine = new Engine(minimalClock);
     const scope = makeScope("merged-throw");
     const vA = clockA.mint();
     const vB = clockB.mint();
@@ -282,7 +292,7 @@ describe("Q5 · defer: conflict stays open, state unchanged, subsequent resoluti
     await engine.apply(makeStateBatch(scope, "u1", "val-B", "id-B", vB));
     expect(() =>
       engine.resolveConflict(scope, makeConflictUnit("u1"), { decision: "merged" } as any)
-    ).toThrow("resolveConflict: 'merged' is not supported in Phase 2");
+    ).toThrow("mergeVersions");
   });
 
   it("take-remote resolves an ephemeral conflict and does not advance the cursor", async () => {

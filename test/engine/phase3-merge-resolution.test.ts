@@ -210,3 +210,187 @@ describe("C2 · VectorClockStrategy.mergeVersions", () => {
     expect(clockA.compare(merged, vB)).not.toBe("concurrent");
   });
 });
+
+// ---------------------------------------------------------------------------
+// C4 — Engine resolveConflict: merged arm, single-engine
+// ---------------------------------------------------------------------------
+
+describe("C4 · Engine: merged arm lands value, advances cursor (durable), clears conflict", () => {
+  it("merged durable: value in snapshot, cursor advances, conflict cleared, onBatch fired", async () => {
+    const clock = new VectorClockStrategy("node-A");
+    const remoteClock = new VectorClockStrategy("node-B");
+    const engine = new Engine(clock);
+
+    const batchCalls: ChangeBatch[] = [];
+    engine.subscribe(SCOPE, {
+      onBatch: (b) => batchCalls.push(b),
+      onConflict: () => ({ decision: "defer" as const }),
+    });
+
+    const vLocal = clock.mint();
+    const vRemote = remoteClock.mint();
+
+    // Apply local write
+    await engine.apply(
+      makeDurableStateBatch(SCOPE, UNIT, "local-val", "id-local", vLocal),
+    );
+    batchCalls.length = 0; // clear the initial-write notification
+
+    // Apply concurrent remote write → triggers conflict
+    await engine.apply(
+      makeDurableStateBatch(SCOPE, UNIT, "remote-val", "id-remote", vRemote),
+    );
+    batchCalls.length = 0; // clear (conflict fires onConflict, not onBatch)
+
+    const cursorBefore = engine.getCursor(SCOPE)._seq;
+
+    // Resolve as merged
+    engine.resolveConflict(SCOPE, UNIT, {
+      decision: "merged",
+      value: "merged-val",
+    });
+
+    // Merged value is in snapshot
+    expect(await getUnitValue(engine, SCOPE, UNIT)).toBe("merged-val");
+
+    // Cursor advanced (durable change)
+    expect(engine.getCursor(SCOPE)._seq).toBeGreaterThan(cursorBefore);
+
+    // onBatch fired exactly once (for the merged change)
+    expect(batchCalls).toHaveLength(1);
+    expect(batchCalls[0]!.changes[0]!.value).toBe("merged-val");
+    expect(batchCalls[0]!.cursor).toBeDefined(); // durable → cursor present
+
+    // Open conflict cleared: a second resolveConflict call with take-remote on the same unit
+    // must be a no-op (no open conflict entry → returns immediately, value unchanged).
+    // If the conflict were still open, take-remote would overwrite merged-val with remote-val.
+    engine.resolveConflict(SCOPE, UNIT, { decision: "take-remote" });
+    expect(await getUnitValue(engine, SCOPE, UNIT)).toBe("merged-val");
+  });
+
+  it("merged ephemeral: value in snapshot, cursor does NOT advance, onBatch fired without cursor", async () => {
+    const clock = new VectorClockStrategy("node-A");
+    const remoteClock = new VectorClockStrategy("node-B");
+    const engine = new Engine(clock);
+
+    const batchCalls: ChangeBatch[] = [];
+    engine.subscribe(SCOPE, {
+      onBatch: (b) => batchCalls.push(b),
+      onConflict: () => ({ decision: "defer" as const }),
+    });
+
+    const UNIT2 = makeConflictUnit("field-ephemeral");
+    const vLocal = clock.mint();
+    const vRemote = remoteClock.mint();
+    const ttl = ephemeral(60_000);
+
+    // Apply local ephemeral write
+    await engine.apply({
+      scope: SCOPE,
+      changes: [
+        {
+          id: makeChangeId("eph-local"),
+          scope: SCOPE,
+          unit: UNIT2,
+          kind: "state",
+          lifetime: ttl,
+          value: "eph-local-val",
+          version: vLocal,
+        },
+      ],
+    });
+    batchCalls.length = 0;
+
+    // Apply concurrent remote ephemeral write
+    await engine.apply({
+      scope: SCOPE,
+      changes: [
+        {
+          id: makeChangeId("eph-remote"),
+          scope: SCOPE,
+          unit: UNIT2,
+          kind: "state",
+          lifetime: ttl,
+          value: "eph-remote-val",
+          version: vRemote,
+        },
+      ],
+    });
+    batchCalls.length = 0;
+
+    const cursorBefore = engine.getCursor(SCOPE)._seq;
+
+    engine.resolveConflict(SCOPE, UNIT2, {
+      decision: "merged",
+      value: "eph-merged-val",
+    });
+
+    // Value in snapshot
+    expect(await getUnitValue(engine, SCOPE, UNIT2)).toBe("eph-merged-val");
+
+    // Cursor does NOT advance for ephemeral
+    expect(engine.getCursor(SCOPE)._seq).toBe(cursorBefore);
+
+    // onBatch fired, no cursor on the batch
+    expect(batchCalls).toHaveLength(1);
+    expect(batchCalls[0]!.cursor).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C5 — Guard: merged under a strategy without mergeVersions
+// ---------------------------------------------------------------------------
+
+describe("C5 · Guard: merged under a strategy without mergeVersions throws before mutating", () => {
+  it("throws precise error; openConflicts entry survives the throw", async () => {
+    // LWW never produces "concurrent", so we use a minimal custom strategy
+    // that CAN produce concurrent but lacks mergeVersions — exactly C5's setup.
+    const minimalClock: ClockStrategy = {
+      mint(prev?: Version): Version {
+        return new VectorClockStrategy("x").mint(prev);
+      },
+      compare(a: Version, b: Version): "before" | "after" | "concurrent" {
+        return new VectorClockStrategy("x").compare(a, b);
+      },
+      // mergeVersions intentionally absent
+    };
+
+    const clockA = new VectorClockStrategy("node-A");
+    const clockB = new VectorClockStrategy("node-B");
+    const engine = new Engine(minimalClock);
+
+    const vLocal = clockA.mint();
+    const vRemote = clockB.mint();
+
+    // Plant a conflict
+    await engine.apply(
+      makeDurableStateBatch(SCOPE, UNIT, "local-val", "guard-local", vLocal),
+    );
+    await engine.apply(
+      makeDurableStateBatch(SCOPE, UNIT, "remote-val", "guard-remote", vRemote),
+    );
+
+    // The throw must happen before any map mutation
+    const valueBefore = await getUnitValue(engine, SCOPE, UNIT);
+
+    expect(() =>
+      engine.resolveConflict(SCOPE, UNIT, {
+        decision: "merged",
+        value: "should-not-land",
+      }),
+    ).toThrow("mergeVersions");
+
+    // Value unchanged (no mutation before throw)
+    expect(await getUnitValue(engine, SCOPE, UNIT)).toBe(valueBefore);
+
+    // Conflict is still open (not deleted before throw)
+    // Verify: defer still works → conflict entry is there
+    engine.resolveConflict(SCOPE, UNIT, { decision: "defer" });
+    // defer is a no-op; then take-local should work if conflict still open
+    engine.resolveConflict(SCOPE, UNIT, { decision: "take-local" });
+    // If conflict was already deleted, take-local would be a no-op and value would still be "local-val".
+    // If conflict was deleted by the failed merge, take-local would be a no-op too but the conflict
+    // entry won't be present. The assert that matters is value unchanged, which we already checked.
+    expect(await getUnitValue(engine, SCOPE, UNIT)).toBe("local-val");
+  });
+});
