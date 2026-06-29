@@ -25,7 +25,7 @@
 
 ## Current State
 
-_Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 2 complete; `merged` resolution mechanism locked (implementation pending).
+_Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 complete; G2 Public API surface resolved and locked.
 
 ### Status at a glance
 - **Seam contract:** v1.1. T1–T5 ratified; eight seam types defined; §9 consumer map
@@ -33,7 +33,7 @@ _Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional meth
   optional method (2026-06-29). Founding semantics otherwise unchanged.
 - **Governance scaffold:** Complete. Charter, custom instructions, AGENTS.md, decision log,
   implementation-state all in place.
-- **Code:** Phase 2 complete + audit fixed. `VectorClockStrategy` + Model C engine (`openConflicts`, `resolveConflict`) + `ResolverPump`. 40 tests passing. `tsc --noEmit` clean. T4 concurrent path activated and proven on ≥2 replicas. `merged` resolution mechanism locked — implementation pending (Phase 3).
+- **Code:** Phase 3 complete. `VectorClockStrategy.mergeVersions` + engine `merged` arm implemented and gate-verified (C1–C7). 55 tests passing. `tsc --noEmit` clean. Public API shape locked (G2 resolved); implementation brief handed to runtime.
 
 ### Locked (do not drift without an explicit superseding entry)
 - **Standalone** — `ns` has no dependency on any neutro sibling. No `neutro/*` runtime import
@@ -70,16 +70,23 @@ _Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional meth
   where `compare` never returns `concurrent` (e.g. LWW). Convergence mechanism: element-wise
   max (causal join, no local-slot increment) — deterministic, order-independent, dominating.
   Engine guard: `merged` arm throws a precise error if `mergeVersions` absent. Propagated
-  resolution deferred. Implementation pending (Phase 3). See 2026-06-29 entry.
+  resolution deferred. **Implementation complete (Phase 3).** C1–C7 gate verified; 55 tests passing. See 2026-06-29 Phase 3 entry.
+- **Public API shape [LOCKED — G2]** — `createSync(config)` → client; `client.scope(key, cfg)` →
+  handle; `handle.set/do/subscribe/snapshot/onConflict(manual)/close`; per-scope config via client
+  multiplexing one Engine per scope-config; transport bridged in the client; no
+  `Version`/`Cursor`/`Change`-construction in any consumer signature. Additive over seam v1.1.
+  See 2026-06-29 G2 entry.
 
 ### Open gates (surfaced, NOT decided — do not build past)
-- **G2 — Public API surface**: consumer-facing client/builder ergonomics atop the frozen seam.
-  Blocks Phase 4. Sketches allowed as design docs; no frozen API.
 - **G3 — LCD-risk proof**: demonstrate the universal seam isn't worse than a purpose-built
   engine per consumer. Addressed by the conformance suite; not blocking early phases.
 
 ### Superseded / resolved
 - **G1 — Substrate** — RESOLVED 2026-06-24: `ns` is standalone (option a).
+- **G2 — Public API surface** — RESOLVED 2026-06-29: `createSync` factory + per-scope chainable
+  handles; per-scope config via client multiplexing (no engine change); `set`/`do` write surface;
+  auto-resolution default. Pure-additive over seam v1.1. See 2026-06-29 G2 entry +
+  `docs/design/public-api.md`. Blocks Phase 4 *implementation*, not design.
 
 ---
 
@@ -467,3 +474,75 @@ code change is the implementation brief's job).
 
 **Out of scope (unchanged):** `_applyOp` concurrent routing (separate Phase 3 runtime sub-gate;
 `merged` for ops inherits this design once the op path carries `VersionedChange`).
+
+---
+
+### 2026-06-29 — G2 Public API surface resolved; pure-additive over seam v1.1 [LOCKED — G2 closed]
+
+**Gate:** G2 (Public API surface), open since 2026-06-24. Resolved by an architect session.
+Design doc: `docs/design/public-api.md`. Implementation brief handed to runtime+CC.
+**No seam change. No T1–T5 change. No runtime sub-gate spawned.** G2 is purely additive over the
+frozen seam (v1.1), as pre-committed in the 2026-06-24 framework-composition entry.
+
+Signatures verified against source at HEAD `950d6d1` before designing: `Engine(clock, resolver?)`
+is single-clock/single-resolver per engine; the engine is transport-unaware; `resolveConflict`,
+`getCursor` are non-interface methods; `ResolverPump` is a standalone per-scope bridge.
+
+**Decision.**
+
+1. **Q-B (load-bearing) — per-scope config via client multiplexing, NOT an engine change.**
+   The public client holds one `Engine` per scope-config (`Map<scopeKey, {engine, clock,
+   lifetimeDefault, transportBinding, cursor}>`) and routes each scope to its own engine. The
+   `Engine`'s single-clock limitation is **not a defect to fix** — it aligns with T5 (no
+   cross-scope coordination is promised), so two scopes share no state to amortize and one
+   engine-per-config costs nothing over one engine-with-N-scopes. Registering per-scope clocks
+   inside the engine would add a hot-path scope→clock lookup in `_applyState` (the most
+   perf-sensitive method) to buy a capability the client provides for free. **Rejected. G2 stays
+   additive; no runtime sub-gate.**
+
+2. **Q-A — `createSync(config)` factory → client; `client.scope(key, scopeConfig)` → chainable
+   scope handle.** The handle is the reusable unit the consumer holds (`presence.set(...)`,
+   `doc.subscribe(...)`). Builder rejected (terminal `.build()` fights dynamic scope
+   registration); upfront config-object allowed as sugar (`createSync({transport, scopes})`).
+   Re-`scope()` with same key returns the cached handle; with conflicting config, throws.
+
+3. **Q-C — write surface: verb-per-kind on the bound handle.** `set(unit, value, opts?)` (state)
+   / `do(unit, value, opts?)` (op). Perf-grounded: per-write cost equals hand-wiring
+   (`mint()` + one `Change` literal + `apply()`), one call frame over, zero extra allocation —
+   the handle is allocated once at `scope()` time, methods close over scope config. Per-write
+   builder rejected (allocates per write in the hot path); single `emit(...,{kind})` rejected
+   (runtime kind-branch + options read per write, strictly ≥0 cost, reads worse). `version` is
+   minted internally (`clock.mint(prev?)`, handle tracks `prev` per unit); **no `Version`,
+   `ClockStrategy`, `ConflictUnit`, or `Cursor` in any consumer-facing signature.** `set`/`do`
+   return `void` — awaiting a local write would contradict the mandate.
+
+4. **Q-D — subscription returns `readonly Change[]` (cursor stripped); conflict auto-resolution
+   ON by default when a resolver is configured.** Auto-on is the *correct* default, not just
+   convenient: §5 requires a deterministic resolver for convergence, so a configured-but-unrun
+   resolver = silent divergence — the exact failure the contract prevents. Opt-out via
+   `{manual: true}` for intentional hold-open UX, exposing a narrow `handle.onConflict((c,
+   resolve)=>…)` hook that wraps `engine.resolveConflict` (consumer never constructs scope/unit).
+
+5. **Q-E — transport attached once at `createSync({transport})`; client owns the full bridge.**
+   Outbound `onBatch→send`, inbound `receive→apply` (demultiplexed by `batch.scope.key`),
+   T3 reconnect fork client-driven (engine is transport-unaware): durable scopes replay via
+   `changes(scope, lastCursor)`, ephemeral via `snapshot(scope)`. Client tracks `lastCursor`
+   per durable scope internally. **No `Cursor` reaches the consumer by any path.**
+
+6. **Q-F — internal/public boundary frozen.** Public: `createSync`, `client.scope`,
+   `handle.set/do/subscribe/snapshot/close`, `handle.onConflict` (manual only), `client.close`,
+   strategy factories `lww()`/`vectorClock()`. Internal: `Engine` ctor, raw `apply`/`changes`,
+   `getCursor`, `resolveConflict` (except via the wrapped manual hook), `ResolverPump`, all
+   `make*` token factories + `mint`.
+
+**One named residual (steelman-then-leak):** a `StateChange` in the `subscribe` changes array
+carries its `.version`. The consumer sees it but it is branded-opaque and inert — stripping it
+would force a per-fire clone (allocation in the read hot path). Deliberate zero-copy-over-perfect-
+hiding trade; opacity already neutralizes misuse. Recorded as a decision, not an accident.
+
+**Supersedes:** the `2026-06-24 Public API gate opened [OPEN — G2]` entry — gate now closed.
+The write/emit ergonomics left open there are resolved by item 3.
+
+**Out of scope (unchanged):** `_applyOp` concurrent routing (Phase 3 runtime sub-gate); async
+local write + backpressure (Phase 5); framework adapters (Phase 4 implementation, downstream of
+this frozen plain-TS surface); first-consumer integration (CC/build task downstream of this gate).
