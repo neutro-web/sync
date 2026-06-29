@@ -439,9 +439,6 @@ export class Engine implements Feed, ScopeRouter {
 			scopeState.openConflicts.delete(unit.key);
 			scopeState.seenIds.add(open.local.id.value);
 			scopeState.seenIds.add(open.remote.id.value);
-			scopeState.openConflicts.delete(unit.key);
-			scopeState.seenIds.add(open.local.id.value);
-			scopeState.seenIds.add(open.remote.id.value);
 			this._landChange(mergedChange, scopeState, scope, unit.key);
 			return;
 		}
@@ -463,10 +460,8 @@ export class Engine implements Feed, ScopeRouter {
 
 	// ---- Private ------------------------------------------------------------
 
-	/**
-	 * Write a resolved StateChange to the confirmed maps and fire onBatch.
-	 * Shared by the merged and take-remote arms of resolveConflict.
-	 */
+	// Single "land a StateChange" primitive — avoids duplicating the durable/ephemeral
+	// routing + cursor advance + onBatch fire across every resolveConflict arm.
 	private _landChange(
 		change: StateChange,
 		scopeState: ScopeState,

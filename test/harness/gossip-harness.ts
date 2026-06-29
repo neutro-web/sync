@@ -1,6 +1,6 @@
 /**
- * Shared gossip-wiring helpers for multi-replica engine tests.
- * Used by phase2-conflict.test.ts and phase3-merge-resolution.test.ts.
+ * Gossip-wiring helpers for multi-replica Engine tests.
+ * Keeps conflict detection tests focused on resolution logic, not mesh setup.
  */
 import type { Engine } from "../../src/core/engine.ts";
 import type { Scope } from "../../src/core/types.ts";
@@ -67,7 +67,7 @@ export function setupGossip(
 
 /**
  * Drain channels until quiescence (no deliveries in a round) or maxRounds.
- * Accepts an array of ChannelSimulators or a Map (only values are drained).
+ * Throws if maxRounds is exhausted without quiescing — convergence failure.
  */
 export async function drainChannels(
 	channels: ChannelSimulator[],

@@ -33,35 +33,11 @@ import type {
 	Scope,
 } from "../../src/core/types.ts";
 import { LWWClockStrategy } from "../../src/strategies/lww.ts";
-import { ChannelSimulator } from "../harness/channel-simulator.ts";
-import type { FaultConfig } from "../harness/channel-simulator.ts";
+import { drainChannels, setupGossip } from "../harness/gossip-harness.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Drain all channels to quiescence (round-based).
- *
- * Algorithm mirrors ConvergenceHarness.drainToQuiescence() in
- * test/harness/convergence-harness.ts. It is co-located here (rather than
- * imported from harness) because these engine tests wire gossip through the
- * production ScopeRouter.subscribe() API, not through harness internals — the
- * two are deliberately kept separate. Any change to the drain algorithm must be
- * applied in both places.
- */
-async function drainChannels(
-	channels: ChannelSimulator[],
-	maxRounds = 100,
-): Promise<void> {
-	for (let round = 0; round < maxRounds; round++) {
-		let delivered = 0;
-		for (const ch of channels) delivered += ch.drain();
-		await Promise.resolve();
-		if (delivered === 0) return;
-	}
-	throw new Error(`drainChannels: did not quiesce after ${maxRounds} rounds`);
-}
 
 /**
  * Get the current value per unit for a scope from an engine's snapshot.
@@ -77,72 +53,6 @@ async function getState(
 		state.set(c.unit.key, c.value);
 	}
 	return state;
-}
-
-/**
- * Wire N-replica gossip through directed ChannelSimulators.
- * Each engine subscribes to `scope`; on `onBatch`, enqueues to channels toward
- * all other engines. Channel keys: "i→j". Seeds: baseSeed + i*100 + j.
- */
-/**
- * Wire N-replica gossip through directed ChannelSimulators.
- * Each engine subscribes to `scope`; on `onBatch`, enqueues to channels toward
- * all other engines. Channel keys: "i→j". Seeds: baseSeed + i*100 + j.
- *
- * Returns `throwIfErrors()` — call after drainChannels() to surface any
- * apply() rejections that occurred during delivery. This replaces the prior
- * `void engines[j].apply(b)` pattern which silently swallowed rejections.
- */
-function setupGossip(
-	engines: Engine[],
-	scope: Scope,
-	baseSeed: number,
-	faultConfig?: FaultConfig,
-): {
-	channels: Map<string, ChannelSimulator>;
-	allChannels: ChannelSimulator[];
-	throwIfErrors(): void;
-} {
-	const n = engines.length;
-	const channels = new Map<string, ChannelSimulator>();
-	const deliveryErrors: unknown[] = [];
-
-	for (let i = 0; i < n; i++) {
-		for (let j = 0; j < n; j++) {
-			if (i === j) continue;
-			channels.set(
-				`${i}→${j}`,
-				new ChannelSimulator(baseSeed + i * 100 + j, faultConfig),
-			);
-		}
-	}
-
-	for (let i = 0; i < n; i++) {
-		const capturedI = i;
-		// biome-ignore lint/style/noNonNullAssertion: i < n === engines.length
-		engines[i]!.subscribe(scope, {
-			onBatch: (batch) => {
-				for (let j = 0; j < n; j++) {
-					if (j === capturedI) continue;
-					// biome-ignore lint/style/noNonNullAssertion: channel created for all i≠j pairs
-					const ch = channels.get(`${capturedI}→${j}`)!;
-					ch.enqueue(batch, (b) => {
-						// biome-ignore lint/style/noNonNullAssertion: j < n === engines.length
-						engines[j]!.apply(b).catch((err) => deliveryErrors.push(err));
-					});
-				}
-			},
-			onConflict: () => ({ decision: "defer" }),
-		});
-	}
-
-	return {
-		channels,
-		allChannels: Array.from(channels.values()),
-		throwIfErrors(): void {
-			if (deliveryErrors.length > 0) throw deliveryErrors[0];
-		},
-	};
 }
 
 /** Make a durable state ChangeBatch for a single change. */
