@@ -383,3 +383,15 @@ only `Version` per unit (`opUnitVersions`), not a full `VersionedChange`. A corr
 payload requires both `local` and `remote` as full `VersionedChange`. Follow-up: rename
 `opUnitVersions` to `opUnitChanges: Map<string, VersionedChange>` and route op conflicts through
 the same Model C path.
+
+---
+
+### 2026-06-28 — Phase 2/3 Consolidation close-out
+
+**P8 and P9 confirmed landed.** Both tests exist and are green (40/40). No carried debt remains from the Phase 1b hardening brief on reconnect-replay and 3-replica-contention-under-partition.
+
+**Resolver-determinism expectation documented.** The convergence guarantee (Q4: independent replica resolution converges) holds only if the `Resolver` is a deterministic pure function of its `Conflict` input. Now a stated requirement in `seam-contract.md` §5 at v1.0. Constrains resolver implementations, not the type surface — `types.ts` unchanged.
+
+**`merged`/`mergeVersions` deferred to Phase 3 architect sub-gate.** Phase 2 `throw` stays. Correct `merged` support requires `ClockStrategy.mergeVersions(a, b)` — a seam-contract addition needing its own gate.
+
+**`_applyOp` concurrent routing confirmed Phase 3.** Op-path concurrent arm stays deferred. Stale comment ("Phase 2 will route") corrected to "Phase 3 will route (op path)". Op routing requires the op path to carry `VersionedChange` (not just `Version`) to build a `Conflict` payload.
