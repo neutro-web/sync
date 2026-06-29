@@ -547,7 +547,7 @@ describe("C6 · ≥2-replica convergence under fault injection", () => {
 // ---------------------------------------------------------------------------
 
 describe("§8 cross-lifetime: durable+ephemeral concurrent pair opens a conflict; merged uses local.lifetime", () => {
-  it("a durable write followed by an ephemeral concurrent write does not open a conflict (different lifetime classes route to different maps, winner is by version)", async () => {
+  it("opens a conflict for durable+ephemeral concurrent pair; merged uses open.local.lifetime", async () => {
     // Under current routing: _applyState compares the incoming version against
     // _stateWinner(durable, ephemeral). If the ephemeral and durable are both
     // present, _stateWinner picks the higher-version one for comparison. So the
