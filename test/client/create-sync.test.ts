@@ -183,13 +183,13 @@ describe("G2-4: per-scope config isolation", () => {
 		// LWW scope has a clean winner in B's snapshot (node 1 > node 0 → B's value)
 		const lwwSnap = await lwwB.snapshot();
 		expect(lwwSnap.length).toBe(1);
-		expect(lwwSnap[0]!.value).toBe("from-B");
+		expect(lwwSnap[0]?.value).toBe("from-B");
 
 		// VC scope resolved — B's snapshot has a value (not stuck open)
 		const vcSnap = await vcB.snapshot();
 		expect(vcSnap.length).toBe(1);
 		// alphabetResolver: "from-B" > "from-A" → take-local on B → "from-B" wins on B
-		expect(vcSnap[0]!.value).toBe("from-B");
+		expect(vcSnap[0]?.value).toBe("from-B");
 
 		syncA.close();
 		syncB.close();
@@ -213,8 +213,8 @@ describe("G2-4: per-scope config isolation", () => {
 		expect(s1Changes.length).toBe(1);
 		expect(s2Changes.length).toBe(1);
 		// Changes stay in their own scope
-		expect(s1Changes[0]![0]!.value).toBe("v1");
-		expect(s2Changes[0]![0]!.value).toBe("v2");
+		expect(s1Changes[0]?.[0]?.value).toBe("v1");
+		expect(s2Changes[0]?.[0]?.value).toBe("v2");
 
 		sync.close();
 	});
