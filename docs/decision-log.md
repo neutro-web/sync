@@ -25,14 +25,15 @@
 
 ## Current State
 
-_Last updated: 2026-06-28. Seam Contract **v1.0** (frozen)._ Phase 2 complete.
+_Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 2 complete; `merged` resolution mechanism locked (implementation pending).
 
 ### Status at a glance
-- **Seam contract:** FROZEN at v1.0. T1–T5 ratified; eight seam types defined; §9 consumer map
-  and §9.1 local-derived-state rule in place. This is the founding semantics.
+- **Seam contract:** v1.1. T1–T5 ratified; eight seam types defined; §9 consumer map
+  and §9.1 local-derived-state rule in place. `ClockStrategy.mergeVersions?(a, b)` added as
+  optional method (2026-06-29). Founding semantics otherwise unchanged.
 - **Governance scaffold:** Complete. Charter, custom instructions, AGENTS.md, decision log,
   implementation-state all in place.
-- **Code:** Phase 2 complete + audit fixed. `VectorClockStrategy` + Model C engine (`openConflicts`, `resolveConflict`) + `ResolverPump`. 40 tests passing. `tsc --noEmit` clean. T4 concurrent path activated and proven on ≥2 replicas.
+- **Code:** Phase 2 complete + audit fixed. `VectorClockStrategy` + Model C engine (`openConflicts`, `resolveConflict`) + `ResolverPump`. 40 tests passing. `tsc --noEmit` clean. T4 concurrent path activated and proven on ≥2 replicas. `merged` resolution mechanism locked — implementation pending (Phase 3).
 
 ### Locked (do not drift without an explicit superseding entry)
 - **Standalone** — `ns` has no dependency on any neutro sibling. No `neutro/*` runtime import
@@ -64,6 +65,12 @@ _Last updated: 2026-06-28. Seam Contract **v1.0** (frozen)._ Phase 2 complete.
   is the optional automatic bridge. Convergence: approach (a) — deterministic pure-function
   resolver proven on ≥2 replicas under fault injection. `_applyOp` concurrent arm deferred
   (needs full VersionedChange stored per unit). See 2026-06-28 Phase 2 entry.
+- **`merged` resolution + `ClockStrategy.mergeVersions` [LOCKED — seam v1.1]** —
+  `mergeVersions?(a, b): Version` added as optional to `ClockStrategy`; absent on strategies
+  where `compare` never returns `concurrent` (e.g. LWW). Convergence mechanism: element-wise
+  max (causal join, no local-slot increment) — deterministic, order-independent, dominating.
+  Engine guard: `merged` arm throws a precise error if `mergeVersions` absent. Propagated
+  resolution deferred. Implementation pending (Phase 3). See 2026-06-29 entry.
 
 ### Open gates (surfaced, NOT decided — do not build past)
 - **G2 — Public API surface**: consumer-facing client/builder ergonomics atop the frozen seam.
@@ -395,3 +402,68 @@ the same Model C path.
 **`merged`/`mergeVersions` deferred to Phase 3 architect sub-gate.** Phase 2 `throw` stays. Correct `merged` support requires `ClockStrategy.mergeVersions(a, b)` — a seam-contract addition needing its own gate.
 
 **`_applyOp` concurrent routing confirmed Phase 3.** Op-path concurrent arm stays deferred. Stale comment ("Phase 2 will route") corrected to "Phase 3 will route (op path)". Op routing requires the op path to carry `VersionedChange` (not just `Version`) to build a `Conflict` payload.
+
+---
+
+### 2026-06-29 — `merged` resolution mechanism + `ClockStrategy.mergeVersions` [LOCKED — seam v1.0 → v1.1]
+
+**Gate:** Phase 3 architect sub-gate (`merged`/`mergeVersions` design). Resolved by an architect
+session; design doc `docs/design/merge-resolution.md`. Crux (Q-C) grounded by a throwaway spike
+against `src/strategies/vector-clock.ts` (discarded per artifact discipline). Full engine ≥2-replica
+convergence proof routed to the implementation brief, not asserted here.
+
+**Decision.**
+
+1. **Add `mergeVersions` to `ClockStrategy` as an OPTIONAL method** — contract change, **seam v1.0 →
+   v1.1**:
+   ```ts
+   interface ClockStrategy {
+     mint(prev?: Version): Version;
+     compare(a: Version, b: Version): "before" | "after" | "concurrent";
+     mergeVersions?(a: Version, b: Version): Version;   // NEW — optional
+   }
+   ```
+   - **Versions only** (not values, not `base`): version-merge is value-opaque (T2); value-merge is
+     the Resolver's job. Passing values would leak domain data into the version slot.
+   - **Binary** (not variadic): Phase 2 holds exactly one `{local, remote}` open conflict per unit;
+     N-way composes by association. Variadic is a separate future gate.
+   - **Optional, not mandatory:** a strategy whose `compare` never returns `concurrent` (LWW) can
+     never reach `merged`; forcing a throwing stub is noise. Engine guards: the `merged` arm throws
+     a precise error if `mergeVersions` is absent — converting "merged under a non-merge strategy"
+     from silent divergence into a loud, accurate failure.
+
+2. **Convergence mechanism: LOCAL merge with a deterministic dominating version** (handoff §4 option
+   a) — **propagation is NOT required** for vector clock. Rationale (Q-C): the merged version is the
+   **element-wise max with NO local-slot increment** (a causal join, not an authored event). Max is
+   deterministic and order-independent → every replica computes a `compare`-equal version that
+   dominates both inputs → redelivery of either input compares `before` and is skipped → no
+   re-conflict. Combined with the §5 deterministic-resolver requirement, independent local merge
+   converges without gossiping the resolution.
+   - **Equality is tested only via `compare`, never structurally** — two replicas may build the
+     version record with different key order. Stated in the contract.
+   - Rule rejected: max-**then**-local-increment. Each replica increments its own slot → the two
+     merged versions are mutually `concurrent` → re-conflict forever. This is the trap the
+     ≥2-replica test must catch.
+
+3. **`merged` is available only where the version space admits a dominating join** (a
+   join-semilattice). Strategies without one (e.g. a node-less pure wall-clock) omit `mergeVersions`;
+   the engine guard refuses `merged` under them. Real finding, not a defect.
+
+4. **Propagated resolution remains deferred** (Phase 3, separate gate). Needed only if a future
+   strategy cannot produce a cross-replica-identical dominating version locally, or a resolver cannot
+   be deterministic. Not consumed by this decision.
+
+**Engine landing path** (`resolveConflict` `merged` arm replaces the current throw): mint
+`mergeVersions(local.version, remote.version)`; build a new `StateChange` carrying
+`resolution.value` + the merged version + a fresh local `ChangeId` + `local.lifetime`; delete the
+open conflict; add both input ids to `seenIds`; for durable, write `durableStateUnits` + advance
+`cursorSeq` + push `durableLog`; for ephemeral, write `ephemeralStateUnits`; fire `onBatch`. Full
+spec in the design doc §5; implementation brief carries the failable gate items.
+
+**Supersedes:** the 2026-06-28 consolidation line "`merged`/`mergeVersions` deferred to Phase 3
+architect sub-gate" — that gate is now resolved. The Phase 2 `throw` is replaced by the landing path
+above once implemented; until the implementation lands, the throw stays (the decision is locked; the
+code change is the implementation brief's job).
+
+**Out of scope (unchanged):** `_applyOp` concurrent routing (separate Phase 3 runtime sub-gate;
+`merged` for ops inherits this design once the op path carries `VersionedChange`).

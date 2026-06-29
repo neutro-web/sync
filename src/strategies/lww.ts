@@ -30,12 +30,12 @@ import type { ClockStrategy, Version } from "../core/types.ts";
 // ---------------------------------------------------------------------------
 
 interface LWWVersionInternals {
-  readonly _ts: number;
-  readonly _node: number;
+	readonly _ts: number;
+	readonly _node: number;
 }
 
 function asLWW(v: Version): LWWVersionInternals {
-  return v as unknown as LWWVersionInternals;
+	return v as unknown as LWWVersionInternals;
 }
 
 // Module-level counter — each LWWClockStrategy instance gets a unique node id.
@@ -46,41 +46,41 @@ let _instanceCounter = 0;
 // ---------------------------------------------------------------------------
 
 export class LWWClockStrategy implements ClockStrategy {
-  private _counter = 0;
-  private readonly _node: number;
+	private _counter = 0;
+	private readonly _node: number;
 
-  /**
-   * @param nodeId Optional explicit node identifier. When omitted, a unique id
-   * is auto-assigned from a module-level counter. Pass an explicit value in
-   * tests that require deterministic tiebreaking order.
-   */
-  constructor(nodeId?: number) {
-    this._node = nodeId ?? _instanceCounter++;
-  }
+	/**
+	 * @param nodeId Optional explicit node identifier. When omitted, a unique id
+	 * is auto-assigned from a module-level counter. Pass an explicit value in
+	 * tests that require deterministic tiebreaking order.
+	 */
+	constructor(nodeId?: number) {
+		this._node = nodeId ?? _instanceCounter++;
+	}
 
-  /**
-   * Mint a new version token. Advances the internal counter past `prev`
-   * (Lamport-style): the result is always strictly newer than `prev`.
-   * Without `prev`, increments the counter from its current position.
-   */
-  mint(prev?: Version): Version {
-    this._counter = Math.max(this._counter, prev ? asLWW(prev)._ts : 0) + 1;
-    return { _ts: this._counter, _node: this._node } as unknown as Version;
-  }
+	/**
+	 * Mint a new version token. Advances the internal counter past `prev`
+	 * (Lamport-style): the result is always strictly newer than `prev`.
+	 * Without `prev`, increments the counter from its current position.
+	 */
+	mint(prev?: Version): Version {
+		this._counter = Math.max(this._counter, prev ? asLWW(prev)._ts : 0) + 1;
+		return { _ts: this._counter, _node: this._node } as unknown as Version;
+	}
 
-  /**
-   * Compare two versions. Returns `"after"` or `"before"`; **never returns
-   * `"concurrent"`** — that is LWW's defining property.
-   *
-   * Ordering: first by `_ts` (higher wins); on equal `_ts`, by `_node`
-   * (higher wins). An identical `(_ts, _node)` pair is treated as `"before"`
-   * (idempotent re-apply).
-   */
-  compare(a: Version, b: Version): "before" | "after" | "concurrent" {
-    const av = asLWW(a);
-    const bv = asLWW(b);
-    if (av._ts !== bv._ts) return av._ts > bv._ts ? "after" : "before";
-    if (av._node !== bv._node) return av._node > bv._node ? "after" : "before";
-    return "before"; // identical token — idempotent re-apply
-  }
+	/**
+	 * Compare two versions. Returns `"after"` or `"before"`; **never returns
+	 * `"concurrent"`** — that is LWW's defining property.
+	 *
+	 * Ordering: first by `_ts` (higher wins); on equal `_ts`, by `_node`
+	 * (higher wins). An identical `(_ts, _node)` pair is treated as `"before"`
+	 * (idempotent re-apply).
+	 */
+	compare(a: Version, b: Version): "before" | "after" | "concurrent" {
+		const av = asLWW(a);
+		const bv = asLWW(b);
+		if (av._ts !== bv._ts) return av._ts > bv._ts ? "after" : "before";
+		if (av._node !== bv._node) return av._node > bv._node ? "after" : "before";
+		return "before"; // identical token — idempotent re-apply
+	}
 }

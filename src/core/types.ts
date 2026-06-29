@@ -15,22 +15,22 @@
 
 declare const ChangeIdBrand: unique symbol;
 export interface ChangeId {
-  readonly [ChangeIdBrand]: true;
-  readonly value: string;
+	readonly [ChangeIdBrand]: true;
+	readonly value: string;
 }
 
 declare const ScopeBrand: unique symbol;
 /** Opaque partition key: document id, room, collection, key-prefix, etc. */
 export interface Scope {
-  readonly [ScopeBrand]: true;
-  readonly key: string;
+	readonly [ScopeBrand]: true;
+	readonly key: string;
 }
 
 declare const ConflictUnitBrand: unique symbol;
 /** ns compares units for equality/dedup only; never interprets structure. */
 export interface ConflictUnit {
-  readonly [ConflictUnitBrand]: true;
-  readonly key: string;
+	readonly [ConflictUnitBrand]: true;
+	readonly key: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -44,7 +44,7 @@ declare const VersionBrand: unique symbol;
  * ns never reads inside it; it only calls ClockStrategy.compare().
  */
 export interface Version {
-  readonly [VersionBrand]: true;
+	readonly [VersionBrand]: true;
 }
 
 // ---------------------------------------------------------------------------
@@ -58,10 +58,10 @@ declare const CursorBrand: unique symbol;
  * Monotonic per scope. Only DURABLE changes advance it (T3).
  */
 export interface Cursor {
-  readonly [CursorBrand]: true;
-  readonly scope: Scope;
-  /** Monotonic durable-change sequence number. Implementation detail, not part of the public seam. */
-  readonly _seq: number;
+	readonly [CursorBrand]: true;
+	readonly scope: Scope;
+	/** Monotonic durable-change sequence number. Implementation detail, not part of the public seam. */
+	readonly _seq: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -69,19 +69,19 @@ export interface Cursor {
 // ---------------------------------------------------------------------------
 
 export type Lifetime =
-  | { readonly class: "durable" }
-  | { readonly class: "ephemeral"; readonly ttlMs: number };
+	| { readonly class: "durable" }
+	| { readonly class: "ephemeral"; readonly ttlMs: number };
 
 // ---------------------------------------------------------------------------
 // § 1  Change — T1
 // ---------------------------------------------------------------------------
 
 interface ChangeBase {
-  readonly id: ChangeId;
-  readonly scope: Scope;
-  readonly unit: ConflictUnit;
-  readonly lifetime: Lifetime;
-  readonly value: unknown;
+	readonly id: ChangeId;
+	readonly scope: Scope;
+	readonly unit: ConflictUnit;
+	readonly lifetime: Lifetime;
+	readonly value: unknown;
 }
 
 /**
@@ -89,9 +89,9 @@ interface ChangeBase {
  * Preset: { idempotent: true, replay: "latest-only", ordering: "per-key" }
  */
 export interface StateChange extends ChangeBase {
-  readonly kind: "state";
-  /** Strategy-owned comparison token. Opaque to ns. Drives conflict detection. */
-  readonly version: Version;
+	readonly kind: "state";
+	/** Strategy-owned comparison token. Opaque to ns. Drives conflict detection. */
+	readonly version: Version;
 }
 
 /**
@@ -100,31 +100,33 @@ export interface StateChange extends ChangeBase {
  * `version` present only for op-transport-with-local-fold consumers.
  */
 export interface OpChange extends ChangeBase {
-  readonly kind: "op";
-  readonly version?: Version;
+	readonly kind: "op";
+	readonly version?: Version;
 }
 
 export type Change = StateChange | OpChange;
 
 /** A Change that carries a version — can participate in conflict detection. */
-export type VersionedChange = StateChange | (OpChange & { readonly version: Version });
+export type VersionedChange =
+	| StateChange
+	| (OpChange & { readonly version: Version });
 
 // ---------------------------------------------------------------------------
 // § 4  ChangeBatch & Snapshot
 // ---------------------------------------------------------------------------
 
 export interface ChangeBatch {
-  readonly scope: Scope;
-  readonly changes: readonly Change[];
-  /** Cursor AFTER applying this batch. Reflects only durable changes (T3). */
-  readonly cursor?: Cursor;
-  /** When true, ns guarantees the batch is all-or-nothing. */
-  readonly atomic?: boolean;
+	readonly scope: Scope;
+	readonly changes: readonly Change[];
+	/** Cursor AFTER applying this batch. Reflects only durable changes (T3). */
+	readonly cursor?: Cursor;
+	/** When true, ns guarantees the batch is all-or-nothing. */
+	readonly atomic?: boolean;
 }
 
 export interface Snapshot {
-  readonly scope: Scope;
-  readonly changes: readonly Change[];
+	readonly scope: Scope;
+	readonly changes: readonly Change[];
 }
 
 // ---------------------------------------------------------------------------
@@ -132,12 +134,12 @@ export interface Snapshot {
 // ---------------------------------------------------------------------------
 
 export interface Feed {
-  /** OUT — durable replay. Emits durable changes since `cursor` in causal order per scope (T5). */
-  changes(scope: Scope, since: Cursor | null): AsyncIterable<ChangeBatch>;
-  /** OUT — current-state-on-subscribe. Used for ephemeral reconnect and memoryless-transport durable. */
-  snapshot(scope: Scope): Promise<Snapshot>;
-  /** IN — apply a batch from a peer/transport. */
-  apply(batch: ChangeBatch): Promise<void>;
+	/** OUT — durable replay. Emits durable changes since `cursor` in causal order per scope (T5). */
+	changes(scope: Scope, since: Cursor | null): AsyncIterable<ChangeBatch>;
+	/** OUT — current-state-on-subscribe. Used for ephemeral reconnect and memoryless-transport durable. */
+	snapshot(scope: Scope): Promise<Snapshot>;
+	/** IN — apply a batch from a peer/transport. */
+	apply(batch: ChangeBatch): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,21 +147,21 @@ export interface Feed {
 // ---------------------------------------------------------------------------
 
 export interface Conflict<V = unknown> {
-  readonly unit: ConflictUnit;
-  readonly local: VersionedChange;
-  readonly remote: VersionedChange;
-  readonly base?: V;
-  readonly scope: Scope;
+	readonly unit: ConflictUnit;
+	readonly local: VersionedChange;
+	readonly remote: VersionedChange;
+	readonly base?: V;
+	readonly scope: Scope;
 }
 
 export type Resolution<V = unknown> =
-  | { readonly decision: "take-local" }
-  | { readonly decision: "take-remote" }
-  | { readonly decision: "merged"; readonly value: V }
-  | { readonly decision: "defer" };
+	| { readonly decision: "take-local" }
+	| { readonly decision: "take-remote" }
+	| { readonly decision: "merged"; readonly value: V }
+	| { readonly decision: "defer" };
 
 export interface Resolver<V = unknown> {
-  resolve(conflict: Conflict<V>): Resolution<V> | Promise<Resolution<V>>;
+	resolve(conflict: Conflict<V>): Resolution<V> | Promise<Resolution<V>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,16 +169,16 @@ export interface Resolver<V = unknown> {
 // ---------------------------------------------------------------------------
 
 export interface ClockStrategy {
-  mint(prev?: Version): Version;
-  compare(a: Version, b: Version): "before" | "after" | "concurrent";
-  /**
-   * Return a version that causally dominates BOTH `a` and `b` and is
-   * `compare`-equal across all replicas that call `mergeVersions(a, b)`.
-   * Required by the `merged` resolution arm; omit on strategies where
-   * `compare` never returns `"concurrent"` (e.g. LWW).
-   * Seam contract v1.1 addition.
-   */
-  mergeVersions?(a: Version, b: Version): Version;
+	mint(prev?: Version): Version;
+	compare(a: Version, b: Version): "before" | "after" | "concurrent";
+	/**
+	 * Return a version that causally dominates BOTH `a` and `b` and is
+	 * `compare`-equal across all replicas that call `mergeVersions(a, b)`.
+	 * Required by the `merged` resolution arm; omit on strategies where
+	 * `compare` never returns `"concurrent"` (e.g. LWW).
+	 * Seam contract v1.1 addition.
+	 */
+	mergeVersions?(a: Version, b: Version): Version;
 }
 
 // ---------------------------------------------------------------------------
@@ -184,17 +186,17 @@ export interface ClockStrategy {
 // ---------------------------------------------------------------------------
 
 export interface Subscription {
-  unsubscribe(): void;
+	unsubscribe(): void;
 }
 
 export interface ScopeRouter {
-  subscribe(
-    scope: Scope,
-    handlers: {
-      onBatch(batch: ChangeBatch): void;
-      onConflict(conflict: Conflict): Resolution | Promise<Resolution>;
-    },
-  ): Subscription;
+	subscribe(
+		scope: Scope,
+		handlers: {
+			onBatch(batch: ChangeBatch): void;
+			onConflict(conflict: Conflict): Resolution | Promise<Resolution>;
+		},
+	): Subscription;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,12 +204,12 @@ export interface ScopeRouter {
 // ---------------------------------------------------------------------------
 
 export interface Transport {
-  /** Resolves on hand-off to the carrier, NOT on ack (mandate: local progress never blocks). */
-  send(batch: ChangeBatch): Promise<void>;
-  receive(onBatch: (batch: ChangeBatch) => void): void;
-  onConnect(handler: () => void): void;
-  onDisconnect(handler: () => void): void;
-  close(): void;
+	/** Resolves on hand-off to the carrier, NOT on ack (mandate: local progress never blocks). */
+	send(batch: ChangeBatch): Promise<void>;
+	receive(onBatch: (batch: ChangeBatch) => void): void;
+	onConnect(handler: () => void): void;
+	onDisconnect(handler: () => void): void;
+	close(): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -216,23 +218,25 @@ export interface Transport {
 // ---------------------------------------------------------------------------
 
 export function makeChangeId(value: string): ChangeId {
-  return { value } as ChangeId;
+	return { value } as ChangeId;
 }
 
 export function makeScope(key: string): Scope {
-  return { key } as Scope;
+	return { key } as Scope;
 }
 
 export function makeConflictUnit(key: string): ConflictUnit {
-  return { key } as ConflictUnit;
+	return { key } as ConflictUnit;
 }
 
 export function makeCursor(scope: Scope, seq: number): Cursor {
-  return { scope, _seq: seq } as Cursor;
+	return { scope, _seq: seq } as Cursor;
 }
 
-export const DURABLE: Lifetime = Object.freeze({ class: "durable" }) as Lifetime;
+export const DURABLE: Lifetime = Object.freeze({
+	class: "durable",
+}) as Lifetime;
 
 export function ephemeral(ttlMs: number): Lifetime {
-  return { class: "ephemeral", ttlMs };
+	return { class: "ephemeral", ttlMs };
 }

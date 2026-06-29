@@ -15,8 +15,8 @@
  * lands. This is the correct representation of an in-flight async resolution.
  */
 
-import type { Resolver, Scope, Conflict, Resolution } from "./types.ts";
 import type { Engine } from "./engine.ts";
+import type { Conflict, Resolution, Resolver, Scope } from "./types.ts";
 
 /**
  * Bridges engine conflict notifications to a {@link Resolver}.
@@ -37,33 +37,35 @@ import type { Engine } from "./engine.ts";
  * `docs/seam-contract.md` §5 for the full expectation.
  */
 export class ResolverPump {
-  private readonly _sub: { unsubscribe(): void };
+	private readonly _sub: { unsubscribe(): void };
 
-  constructor(engine: Engine, resolver: Resolver, scope: Scope) {
-    this._sub = engine.subscribe(scope, {
-      onBatch: () => {},
-      // NOTE: for sync resolvers, this handler calls resolveConflict reentrantly
-      // from inside the engine's onConflict notification loop.
-      onConflict: (conflict: Conflict): Resolution => {
-        const result = resolver.resolve(conflict);
-        if (result instanceof Promise) {
-          result
-            .then((res) => engine.resolveConflict(conflict.scope, conflict.unit, res))
-            .catch((err) => {
-              // Surface async resolution failures — callers cannot observe them otherwise.
-              console.error("[ResolverPump] async resolution failed:", err);
-            });
-          // Conflict stays open while async resolution is in-flight.
-          return { decision: "defer" };
-        }
-        engine.resolveConflict(conflict.scope, conflict.unit, result);
-        return result;
-      },
-    });
-  }
+	constructor(engine: Engine, resolver: Resolver, scope: Scope) {
+		this._sub = engine.subscribe(scope, {
+			onBatch: () => {},
+			// NOTE: for sync resolvers, this handler calls resolveConflict reentrantly
+			// from inside the engine's onConflict notification loop.
+			onConflict: (conflict: Conflict): Resolution => {
+				const result = resolver.resolve(conflict);
+				if (result instanceof Promise) {
+					result
+						.then((res) =>
+							engine.resolveConflict(conflict.scope, conflict.unit, res),
+						)
+						.catch((err) => {
+							// Surface async resolution failures — callers cannot observe them otherwise.
+							console.error("[ResolverPump] async resolution failed:", err);
+						});
+					// Conflict stays open while async resolution is in-flight.
+					return { decision: "defer" };
+				}
+				engine.resolveConflict(conflict.scope, conflict.unit, result);
+				return result;
+			},
+		});
+	}
 
-  /** Unsubscribe the pump. Conflicts detected after this call are not auto-resolved. */
-  dispose(): void {
-    this._sub.unsubscribe();
-  }
+	/** Unsubscribe the pump. Conflicts detected after this call are not auto-resolved. */
+	dispose(): void {
+		this._sub.unsubscribe();
+	}
 }

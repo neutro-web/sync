@@ -22,11 +22,11 @@ import type { ClockStrategy, Version } from "../core/types.ts";
 // ---------------------------------------------------------------------------
 
 interface VCVersionInternals {
-  readonly _vec: Readonly<Record<string, number>>;
+	readonly _vec: Readonly<Record<string, number>>;
 }
 
 function asVC(v: Version): VCVersionInternals {
-  return v as unknown as VCVersionInternals;
+	return v as unknown as VCVersionInternals;
 }
 
 // ---------------------------------------------------------------------------
@@ -34,45 +34,45 @@ function asVC(v: Version): VCVersionInternals {
 // ---------------------------------------------------------------------------
 
 export class VectorClockStrategy implements ClockStrategy {
-  private readonly _nodeId: string;
+	private readonly _nodeId: string;
 
-  constructor(nodeId: string) {
-    this._nodeId = nodeId;
-  }
+	constructor(nodeId: string) {
+		this._nodeId = nodeId;
+	}
 
-  mint(prev?: Version): Version {
-    const prevVec = prev ? asVC(prev)._vec : {};
-    const vec: Record<string, number> = { ...prevVec };
-    vec[this._nodeId] = (vec[this._nodeId] ?? 0) + 1;
-    return { _vec: vec } as unknown as Version;
-  }
+	mint(prev?: Version): Version {
+		const prevVec = prev ? asVC(prev)._vec : {};
+		const vec: Record<string, number> = { ...prevVec };
+		vec[this._nodeId] = (vec[this._nodeId] ?? 0) + 1;
+		return { _vec: vec } as unknown as Version;
+	}
 
-  compare(a: Version, b: Version): "before" | "after" | "concurrent" {
-    const av = asVC(a)._vec;
-    const bv = asVC(b)._vec;
-    const keys = new Set([...Object.keys(av), ...Object.keys(bv)]);
-    let aGtB = false;
-    let bGtA = false;
-    for (const k of keys) {
-      const ai = av[k] ?? 0;
-      const bi = bv[k] ?? 0;
-      if (ai > bi) aGtB = true;
-      if (bi > ai) bGtA = true;
-    }
-    if (aGtB && bGtA) return "concurrent";
-    if (aGtB) return "after";
-    if (bGtA) return "before";
-    return "before"; // equal — idempotent re-apply
-  }
+	compare(a: Version, b: Version): "before" | "after" | "concurrent" {
+		const av = asVC(a)._vec;
+		const bv = asVC(b)._vec;
+		const keys = new Set([...Object.keys(av), ...Object.keys(bv)]);
+		let aGtB = false;
+		let bGtA = false;
+		for (const k of keys) {
+			const ai = av[k] ?? 0;
+			const bi = bv[k] ?? 0;
+			if (ai > bi) aGtB = true;
+			if (bi > ai) bGtA = true;
+		}
+		if (aGtB && bGtA) return "concurrent";
+		if (aGtB) return "after";
+		if (bGtA) return "before";
+		return "before"; // equal — idempotent re-apply
+	}
 
-  mergeVersions(a: Version, b: Version): Version {
-    const av = asVC(a)._vec;
-    const bv = asVC(b)._vec;
-    const keys = new Set([...Object.keys(av), ...Object.keys(bv)]);
-    const vec: Record<string, number> = {};
-    for (const k of keys) {
-      vec[k] = Math.max(av[k] ?? 0, bv[k] ?? 0);
-    }
-    return { _vec: vec } as unknown as Version;
-  }
+	mergeVersions(a: Version, b: Version): Version {
+		const av = asVC(a)._vec;
+		const bv = asVC(b)._vec;
+		const keys = new Set([...Object.keys(av), ...Object.keys(bv)]);
+		const vec: Record<string, number> = {};
+		for (const k of keys) {
+			vec[k] = Math.max(av[k] ?? 0, bv[k] ?? 0);
+		}
+		return { _vec: vec } as unknown as Version;
+	}
 }
