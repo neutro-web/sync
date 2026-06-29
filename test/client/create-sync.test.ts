@@ -212,15 +212,14 @@ describe("G2-5: auto-resolution and manual opt-out", () => {
 		// Deliver A's write to B → conflict detected, handler called, but NOT resolved
 		for (const b of buffA.splice(0)) tB._deliver(b);
 
-		expect(resolveConflict).not.toBeNull();
-
 		// Conflict open: snapshot shows last-confirmed-winner (B's own write, which was confirmed first)
 		const snapBeforeResolve = await docB.snapshot();
 		expect(snapBeforeResolve.length).toBe(1);
 		expect(snapBeforeResolve[0]?.value).toBe("from-B"); // B's confirmed value unchanged
 
 		// Manually resolve: take-remote lands A's value
-		if (resolveConflict) resolveConflict({ decision: "take-remote" });
+		if (!resolveConflict) throw new Error("expected onConflict callback to have been called");
+		resolveConflict({ decision: "take-remote" });
 
 		const snapAfterResolve = await docB.snapshot();
 		expect(snapAfterResolve.length).toBe(1);
