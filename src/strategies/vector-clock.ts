@@ -64,4 +64,15 @@ export class VectorClockStrategy implements ClockStrategy {
     if (bGtA) return "before";
     return "before"; // equal — idempotent re-apply
   }
+
+  mergeVersions(a: Version, b: Version): Version {
+    const av = asVC(a)._vec;
+    const bv = asVC(b)._vec;
+    const keys = new Set([...Object.keys(av), ...Object.keys(bv)]);
+    const vec: Record<string, number> = {};
+    for (const k of keys) {
+      vec[k] = Math.max(av[k] ?? 0, bv[k] ?? 0);
+    }
+    return { _vec: vec } as unknown as Version;
+  }
 }
