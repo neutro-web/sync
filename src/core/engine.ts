@@ -224,7 +224,6 @@ export class Engine implements Feed, ScopeRouter {
 				}
 				return false;
 			}
-			// cmp === "after": incoming is newer, proceed.
 		}
 
 		scope.seenIds.add(change.id.value);
@@ -468,19 +467,21 @@ export class Engine implements Feed, ScopeRouter {
 		scope: Scope,
 		unitKey: string,
 	): void {
-		if (change.lifetime.class === "durable") {
+		const durable = change.lifetime.class === "durable";
+		if (durable) {
 			scopeState.durableStateUnits.set(unitKey, { change });
 			scopeState.cursorSeq++;
 			scopeState.durableLog.push({ change, seq: scopeState.cursorSeq });
 		} else {
 			scopeState.ephemeralStateUnits.set(unitKey, { change });
 		}
+		const cursor = durable
+			? makeCursor(scope, scopeState.cursorSeq)
+			: undefined;
 		const outBatch: ChangeBatch = {
 			scope,
 			changes: [change],
-			...(change.lifetime.class === "durable"
-				? { cursor: makeCursor(scope, scopeState.cursorSeq) }
-				: {}),
+			...(cursor && { cursor }),
 		};
 		for (const handlers of scopeState.subs) {
 			handlers.onBatch(outBatch);

@@ -1,19 +1,7 @@
 /**
  * Phase 1b engine tests — gate items P2–P5.
- *
- * P1 (existing 10 harness tests pass, harness unmodified) is satisfied by the
- * full `pnpm test` run; the harness tests are in test/harness/harness.test.ts
- * and are untouched.
- *
- * Gossip wiring
- * -------------
- * The real Engine does not have an `onForward` callback (that was a harness-only
- * seam on the stubs). Instead, tests wire gossip through `ScopeRouter.subscribe()`:
- * each engine subscribes to the test scope; in `onBatch`, it enqueues the batch
- * into the directed channel toward each peer. The channel delivers asynchronously
- * via `drainChannels()`.
- *
- * This uses the production API (`Feed` + `ScopeRouter`), not harness internals.
+ * P1 is satisfied by the full `pnpm test` run (harness tests in harness.test.ts).
+ * Gossip is wired via the production ScopeRouter.subscribe() API + gossip-harness.ts.
  */
 
 import { describe, expect, it } from "vitest";
