@@ -375,7 +375,9 @@ describe("G2-6: no cursor reaches the consumer", () => {
 			// changes is typed as readonly Change[] — verify at runtime too
 			expect(Array.isArray(changes)).toBe(true);
 			// A ChangeBatch would have a `.cursor` property; Change[] does not
-			expect((changes as Record<string, unknown>)["cursor"]).toBeUndefined();
+			expect(
+				(changes as unknown as Record<string, unknown>).cursor,
+			).toBeUndefined();
 		});
 
 		docA.set("k1", "v1");
@@ -385,7 +387,9 @@ describe("G2-6: no cursor reaches the consumer", () => {
 		expect(callbackArgs.length).toBeGreaterThan(0);
 		for (const arg of callbackArgs) {
 			expect(Array.isArray(arg)).toBe(true);
-			expect((arg as Record<string, unknown>)["cursor"]).toBeUndefined();
+			expect(
+				(arg as unknown as Record<string, unknown>).cursor,
+			).toBeUndefined();
 		}
 
 		syncA.close();
@@ -403,7 +407,7 @@ describe("G2-6: no cursor reaches the consumer", () => {
 		const snap = await docB.snapshot();
 
 		expect(Array.isArray(snap)).toBe(true);
-		expect((snap as Record<string, unknown>)["cursor"]).toBeUndefined();
+		expect((snap as unknown as Record<string, unknown>).cursor).toBeUndefined();
 
 		syncA.close();
 		syncB.close();
@@ -430,7 +434,9 @@ describe("G2-6: no cursor reaches the consumer", () => {
 		const bCallbackArgs: unknown[] = [];
 		docB.subscribe((changes) => {
 			bCallbackArgs.push(changes);
-			expect((changes as Record<string, unknown>)["cursor"]).toBeUndefined();
+			expect(
+				(changes as unknown as Record<string, unknown>).cursor,
+			).toBeUndefined();
 		});
 
 		// Connect A first — A's onConnect fires, replays (nothing yet since no changes)
@@ -448,7 +454,9 @@ describe("G2-6: no cursor reaches the consumer", () => {
 		// Verify all callbacks received arrays, never a ChangeBatch
 		for (const arg of bCallbackArgs) {
 			expect(Array.isArray(arg)).toBe(true);
-			expect((arg as Record<string, unknown>)["cursor"]).toBeUndefined();
+			expect(
+				(arg as unknown as Record<string, unknown>).cursor,
+			).toBeUndefined();
 		}
 
 		syncA.close();
