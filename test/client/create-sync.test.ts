@@ -217,8 +217,10 @@ describe("G2-5: auto-resolution and manual opt-out", () => {
 		expect(snapBeforeResolve.length).toBe(1);
 		expect(snapBeforeResolve[0]?.value).toBe("from-B"); // B's confirmed value unchanged
 
-		// Manually resolve: take-remote lands A's value (snapshot let→const so TS can narrow)
-		const doResolve = resolveConflict;
+		// Manually resolve: take-remote lands A's value
+		// Explicit type annotation prevents TS narrowing resolveConflict to null (lazy-callback assumption)
+		const doResolve: ((r: import("../../src/core/types.ts").Resolution) => void) | null =
+			resolveConflict;
 		if (!doResolve) throw new Error("expected onConflict callback to have been called");
 		doResolve({ decision: "take-remote" });
 
