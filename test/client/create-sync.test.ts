@@ -197,12 +197,12 @@ describe("G2-5: auto-resolution and manual opt-out", () => {
 			manual: true,
 		});
 
-		let resolveConflict:
-			| ((r: import("../../src/core/types.ts").Resolution) => void)
-			| null = null;
+		// Array accumulator avoids TS lazy-callback narrowing (let captured in closure narrows to null)
+		const resolveQueue: Array<
+			(r: import("../../src/core/types.ts").Resolution) => void
+		> = [];
 		docB.onConflict((_conflict, resolve) => {
-			resolveConflict = resolve;
-			// Do NOT resolve immediately — leave conflict open
+			resolveQueue.push(resolve);
 		});
 
 		// Concurrent writes
@@ -218,11 +218,8 @@ describe("G2-5: auto-resolution and manual opt-out", () => {
 		expect(snapBeforeResolve[0]?.value).toBe("from-B"); // B's confirmed value unchanged
 
 		// Manually resolve: take-remote lands A's value
-		// Explicit type annotation prevents TS narrowing resolveConflict to null (lazy-callback assumption)
-		const doResolve: ((r: import("../../src/core/types.ts").Resolution) => void) | null =
-			resolveConflict;
-		if (!doResolve) throw new Error("expected onConflict callback to have been called");
-		doResolve({ decision: "take-remote" });
+		expect(resolveQueue).toHaveLength(1);
+		resolveQueue[0]?.({ decision: "take-remote" });
 
 		const snapAfterResolve = await docB.snapshot();
 		expect(snapAfterResolve.length).toBe(1);
