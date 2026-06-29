@@ -7,3 +7,11 @@ export type {
 	WriteOpts,
 } from "./client/create-sync.ts";
 export { lww, vectorClock } from "./strategies/index.ts";
+export type {
+	Change,
+	Conflict,
+	Lifetime,
+	Resolution,
+	Subscription,
+	Transport,
+} from "./core/types.ts";

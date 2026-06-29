@@ -1,12 +1,11 @@
+import type { ClockStrategy } from "../core/types.ts";
 import { LWWClockStrategy } from "./lww.ts";
 import { VectorClockStrategy } from "./vector-clock.ts";
 
-let _vcNodeSeq = 0;
-
-export function lww(nodeId?: number): LWWClockStrategy {
+export function lww(nodeId?: number): ClockStrategy {
 	return new LWWClockStrategy(nodeId);
 }
 
-export function vectorClock(nodeId?: string): VectorClockStrategy {
-	return new VectorClockStrategy(nodeId ?? `vc-node-${++_vcNodeSeq}`);
+export function vectorClock(nodeId: string): ClockStrategy {
+	return new VectorClockStrategy(nodeId);
 }

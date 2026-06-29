@@ -20,8 +20,6 @@ import {
 	makeScope,
 } from "../core/types.ts";
 
-// ─── Public interfaces ────────────────────────────────────────────────────────
-
 export interface ScopeConfig {
 	strategy: ClockStrategy;
 	resolver?: Resolver;
@@ -55,8 +53,6 @@ export interface SyncClient {
 	close(): void;
 }
 
-// ─── Internal ─────────────────────────────────────────────────────────────────
-
 interface ScopeEntry {
 	engine: Engine;
 	handle: ScopeHandle;
@@ -70,15 +66,15 @@ interface ScopeEntry {
 		| ((conflict: Conflict, resolve: (r: Resolution) => void) => void)
 		| null;
 	scopeObj: Scope;
+	replayVersion: number;
 }
-
-// ─── Factory ──────────────────────────────────────────────────────────────────
 
 export function createSync(config: SyncConfig): SyncClient {
 	const { transport } = config;
 	const entries = new Map<string, ScopeEntry>();
 	let _seq = 0;
 	const _clientId = Math.random().toString(36).slice(2, 8);
+	let closed = false;
 
 	// Inbound: demultiplex by scope key
 	transport.receive((batch: ChangeBatch) => {
@@ -89,13 +85,22 @@ export function createSync(config: SyncConfig): SyncClient {
 				.catch((err) => console.error("[createSync] apply error:", err));
 	});
 
-	// T3 reconnect fork — fires when this transport reconnects
+	// T3 reconnect fork: ephemeral scopes use full snapshot resend (their state has
+	// no stable cursor identity across disconnects); durable scopes use cursor-based
+	// incremental replay to re-send only changes the peer hasn't seen yet.
 	transport.onConnect(() => {
 		for (const entry of entries.values()) {
+			entry.replayVersion++;
+			const myVersion = entry.replayVersion;
 			const isEphemeral = entry.config.lifetime?.class === "ephemeral";
 			if (isEphemeral) {
 				(async () => {
 					const snap = await entry.engine.snapshot(entry.scopeObj);
+					if (myVersion !== entry.replayVersion) return; // superseded
+					// Snapshot changes carry their original ids. If the receiving peer already
+					// has those ids in seenIds, the engine silently drops them — the reconnect
+					// delivers nothing for that scope. This is correct: the peer's state is
+					// already up to date.
 					if (snap.changes.length > 0) {
 						await transport.send({
 							scope: entry.scopeObj,
@@ -109,7 +114,11 @@ export function createSync(config: SyncConfig): SyncClient {
 						entry.scopeObj,
 						entry.lastCursor,
 					)) {
+						if (myVersion !== entry.replayVersion) break; // superseded
 						await transport.send(batch);
+						// Track cursor after each successful send so mid-replay disconnect
+						// does not re-send already-delivered batches on the next reconnect
+						if (batch.cursor) entry.lastCursor = batch.cursor;
 					}
 				})().catch((err) => console.error("[createSync]", err));
 			}
@@ -131,6 +140,7 @@ export function createSync(config: SyncConfig): SyncClient {
 			consumerSubs: new Set(),
 			conflictHandler: null,
 			scopeObj,
+			replayVersion: 0,
 		};
 		entries.set(key, entry);
 
@@ -139,17 +149,27 @@ export function createSync(config: SyncConfig): SyncClient {
 			onBatch(batch: ChangeBatch): void {
 				// Track cursor for durable-scope reconnect replay
 				if (batch.cursor) entry.lastCursor = batch.cursor;
-				// Outbound to transport (full batch, cursor included — peers need it)
+				// Relay semantics: every accepted change (local or remote) is forwarded to transport.
+				// Peers deduplicate via seenIds — no infinite loop, but bandwidth is multiplied by peer count.
+				// This is intentional for peer-to-peer mesh; a future server-relay transport would filter
+				// by origin to avoid redundant sends.
 				transport
 					.send(batch)
 					.catch((err) => console.error("[createSync] send error:", err));
-				// Consumer fan-out: strip cursor, deliver Change[] only
-				for (const cb of entry.consumerSubs) cb(batch.changes);
+				// Consumer fan-out: strip cursor, deliver Change[] only.
+				// Snapshot consumerSubs to prevent mid-iteration mutation from unsubscribe-during-callback.
+				for (const cb of [...entry.consumerSubs]) cb(batch.changes);
 			},
 			onConflict(conflict: Conflict): Resolution {
-				// Engine ignores this return value (T4/Model C); it's a notification only.
-				// In manual mode, delegate to the registered conflict handler.
+				// Engine.onConflict is a notification-only hook (Model C): the return value is
+				// always ignored by the engine. We always return { decision: "defer" } as a
+				// protocol placeholder — resolution is driven by the separate resolveConflict()
+				// call, either from the consumer (manual mode) or from ResolverPump (auto mode).
 				if (cfg.manual && entry.conflictHandler) {
+					// In manual mode, if the consumer never calls resolve(), the conflict stays
+					// open in the engine's openConflicts map indefinitely. This is by design —
+					// the consumer owns the resolution lifecycle. For bounded memory, resolve or
+					// discard every conflict you receive.
 					entry.conflictHandler(conflict, (r: Resolution) => {
 						engine.resolveConflict(conflict.scope, conflict.unit, r);
 					});
@@ -233,10 +253,14 @@ export function createSync(config: SyncConfig): SyncClient {
 			},
 
 			close(): void {
+				if (!entries.has(key)) return; // already closed — idempotent
 				entry.engineSub.unsubscribe();
 				entry.pump?.dispose();
 				entry.consumerSubs.clear();
 				entries.delete(key);
+				// Engine has no close() method. Once entries.delete(key) removes the last
+				// reference, the GC reclaims it. This is safe because createSync owns all
+				// engine references exclusively.
 			},
 		};
 
@@ -253,6 +277,8 @@ export function createSync(config: SyncConfig): SyncClient {
 
 	return {
 		scope(key: string, cfg?: ScopeConfig): ScopeHandle {
+			if (closed)
+				throw new Error("SyncClient is closed; cannot create new scopes.");
 			const existing = entries.get(key);
 			if (existing) {
 				if (cfg !== undefined) {
@@ -271,6 +297,7 @@ export function createSync(config: SyncConfig): SyncClient {
 		},
 
 		close(): void {
+			closed = true;
 			for (const entry of entries.values()) {
 				entry.engineSub.unsubscribe();
 				entry.pump?.dispose();
