@@ -1,3 +1,4 @@
+/** Public API surface for @neutro/sync. Import from this module in consumer code. */
 export { createSync } from "./client/create-sync.ts";
 export type {
 	ScopeConfig,

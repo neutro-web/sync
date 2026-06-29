@@ -19,8 +19,12 @@ import type {
 	Conflict as BarrelConflict,
 	Lifetime as BarrelLifetime,
 	Resolution as BarrelResolution,
+	ScopeHandle as BarrelScopeHandle,
 	Subscription as BarrelSubscription,
+	SyncClient as BarrelSyncClient,
+	SyncConfig as BarrelSyncConfig,
 	Transport as BarrelTransport,
+	WriteOpts as BarrelWriteOpts,
 } from "../../src/index.ts";
 
 describe("ScopeHandle type surface", () => {
@@ -91,6 +95,16 @@ describe("WriteOpts type surface", () => {
 
 	test("unitKey is optional string", () => {
 		expectTypeOf<WriteOpts["unitKey"]>().toEqualTypeOf<string | undefined>();
+	});
+});
+
+describe("barrel client type exports", () => {
+	test("ScopeHandle, SyncClient, SyncConfig, WriteOpts are barrel-exported and structurally identical", () => {
+		expectTypeOf<BarrelScopeHandle>().toEqualTypeOf<ScopeHandle>();
+		expectTypeOf<BarrelSyncClient>().toEqualTypeOf<SyncClient>();
+		expectTypeOf<BarrelSyncConfig>().toEqualTypeOf<SyncConfig>();
+		expectTypeOf<BarrelWriteOpts>().toEqualTypeOf<WriteOpts>();
+		expect(true).toBe(true); // ensure test registers as pass
 	});
 });
 

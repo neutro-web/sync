@@ -16,11 +16,11 @@ describe("G2-3: vanilla end-to-end sync", () => {
 
 		// Ephemeral LWW presence scope
 		const presenceA = syncA.scope("room:42/presence", {
-			strategy: lww(),
+			strategy: lww(1),
 			lifetime: ephemeral(5_000),
 		});
 		const presenceB = syncB.scope("room:42/presence", {
-			strategy: lww(),
+			strategy: lww(2),
 			lifetime: ephemeral(5_000),
 		});
 

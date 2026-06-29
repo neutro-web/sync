@@ -66,12 +66,13 @@ interface ScopeEntry {
 		| ((conflict: Conflict, resolve: (r: Resolution) => void) => void)
 		| null;
 	scopeObj: Scope;
-	replayVersion: number;
+	replayVersion: number; // monotonic counter; incremented on each onConnect to cancel superseded replay loops
 }
 
 export function createSync(config: SyncConfig): SyncClient {
 	const { transport } = config;
 	const entries = new Map<string, ScopeEntry>();
+	const closedKeys = new Set<string>();
 	let _seq = 0;
 	const _clientId = Math.random().toString(36).slice(2, 8);
 	let closed = false;
@@ -88,19 +89,27 @@ export function createSync(config: SyncConfig): SyncClient {
 	// T3 reconnect fork: ephemeral scopes use full snapshot resend (their state has
 	// no stable cursor identity across disconnects); durable scopes use cursor-based
 	// incremental replay to re-send only changes the peer hasn't seen yet.
+	// Note: lastCursor is in-memory only. After a process restart, replay begins
+	// from the beginning of the durable log. Persistent cursor storage is Phase 3.
 	transport.onConnect(() => {
+		if (closed) return; // client is closing or closed
 		for (const entry of entries.values()) {
-			entry.replayVersion++;
+			entry.replayVersion = (entry.replayVersion + 1) >>> 0;
 			const myVersion = entry.replayVersion;
 			const isEphemeral = entry.config.lifetime?.class === "ephemeral";
 			if (isEphemeral) {
 				(async () => {
 					const snap = await entry.engine.snapshot(entry.scopeObj);
 					if (myVersion !== entry.replayVersion) return; // superseded
+					// Ephemeral reconnect: resend the full snapshot. Note that these change ids
+					// were already forwarded via onBatch at write time (relay semantics). Peers
+					// that were connected deduplicate via seenIds and silently ignore them; peers
+					// that were offline receive the full state. This is correct and intentional —
+					// ephemeral state has no stable cursor, so full resend is the only safe strategy.
 					// Snapshot changes carry their original ids. If the receiving peer already
 					// has those ids in seenIds, the engine silently drops them — the reconnect
-					// delivers nothing for that scope. This is correct: the peer's state is
-					// already up to date.
+					// delivers nothing for that scope. This is correct: the peer's state is already up to date.
+					// For a new peer (no prior seenIds), the full snapshot is delivered normally.
 					if (snap.changes.length > 0) {
 						await transport.send({
 							scope: entry.scopeObj,
@@ -156,9 +165,29 @@ export function createSync(config: SyncConfig): SyncClient {
 				transport
 					.send(batch)
 					.catch((err) => console.error("[createSync] send error:", err));
+				// Keep prevVersions in sync with engine-accepted state so future local
+				// mints start from the correct prev. Without this, a remote win would
+				// leave prevVersions below the engine's actual version, causing the next
+				// local set() to silently lose (LWW stale-prev clock drift).
+				for (const change of batch.changes) {
+					if (change.kind === "state" && change.version !== undefined) {
+						const unitKey = change.unit.key;
+						const current = entry.prevVersions.get(unitKey);
+						// Only advance — never go backwards
+						if (
+							current === undefined ||
+							cfg.strategy.compare(current, change.version) === "before"
+						) {
+							entry.prevVersions.set(unitKey, change.version);
+						}
+					}
+				}
 				// Consumer fan-out: strip cursor, deliver Change[] only.
+				// Note: subscribers added during a callback are NOT included in the current
+				// batch's snapshot — they receive subsequent batches only. This is by design.
 				// Snapshot consumerSubs to prevent mid-iteration mutation from unsubscribe-during-callback.
-				for (const cb of [...entry.consumerSubs]) cb(batch.changes);
+				if (entry.consumerSubs.size > 0)
+					for (const cb of [...entry.consumerSubs]) cb(batch.changes);
 			},
 			onConflict(conflict: Conflict): Resolution {
 				// Engine.onConflict is a notification-only hook (Model C): the return value is
@@ -170,11 +199,13 @@ export function createSync(config: SyncConfig): SyncClient {
 					// open in the engine's openConflicts map indefinitely. This is by design —
 					// the consumer owns the resolution lifecycle. For bounded memory, resolve or
 					// discard every conflict you receive.
+					// Post-close calls to resolve() are discarded safely.
 					entry.conflictHandler(conflict, (r: Resolution) => {
+						if (handleClosed) return; // scope is closed; discard post-close resolution
 						engine.resolveConflict(conflict.scope, conflict.unit, r);
 					});
 				}
-				return { decision: "defer" };
+				return { decision: "defer" }; // satisfies TypeScript return type; value is always ignored by the engine
 			},
 		});
 
@@ -183,13 +214,16 @@ export function createSync(config: SyncConfig): SyncClient {
 			entry.pump = new ResolverPump(engine, cfg.resolver, scopeObj);
 		}
 
+		let handleClosed = false;
+
 		const handle: ScopeHandle = {
 			set(unit: string, value: unknown, opts?: WriteOpts): void {
+				if (handleClosed)
+					throw new Error(`ScopeHandle for scope '${key}' is closed.`);
 				const unitKey = opts?.unitKey ?? unit;
 				const lifetime = opts?.lifetime ?? cfg.lifetime ?? DURABLE;
 				const prev = entry.prevVersions.get(unitKey);
 				const version = cfg.strategy.mint(prev);
-				entry.prevVersions.set(unitKey, version);
 				engine
 					.apply({
 						scope: scopeObj,
@@ -205,10 +239,17 @@ export function createSync(config: SyncConfig): SyncClient {
 							},
 						],
 					})
+					.then(() => {
+						// Only record the minted version after the engine confirms acceptance.
+						// If apply() rejected, prevVersions retains the last known-good version.
+						entry.prevVersions.set(unitKey, version);
+					})
 					.catch((err) => console.error("[createSync] apply error:", err));
 			},
 
 			do(unit: string, value: unknown, opts?: WriteOpts): void {
+				if (handleClosed)
+					throw new Error(`ScopeHandle for scope '${key}' is closed.`);
 				const unitKey = opts?.unitKey ?? unit;
 				const lifetime = opts?.lifetime ?? cfg.lifetime ?? DURABLE;
 				engine
@@ -238,6 +279,8 @@ export function createSync(config: SyncConfig): SyncClient {
 			},
 
 			snapshot(): Promise<readonly Change[]> {
+				if (handleClosed)
+					throw new Error(`ScopeHandle for scope '${key}' is closed.`);
 				return entry.engine.snapshot(entry.scopeObj).then((s) => s.changes);
 			},
 
@@ -258,9 +301,11 @@ export function createSync(config: SyncConfig): SyncClient {
 				entry.pump?.dispose();
 				entry.consumerSubs.clear();
 				entries.delete(key);
+				closedKeys.add(key);
 				// Engine has no close() method. Once entries.delete(key) removes the last
 				// reference, the GC reclaims it. This is safe because createSync owns all
 				// engine references exclusively.
+				handleClosed = true;
 			},
 		};
 
@@ -279,6 +324,11 @@ export function createSync(config: SyncConfig): SyncClient {
 		scope(key: string, cfg?: ScopeConfig): ScopeHandle {
 			if (closed)
 				throw new Error("SyncClient is closed; cannot create new scopes.");
+			if (closedKeys.has(key)) {
+				throw new Error(
+					`scope '${key}' was closed and cannot be re-registered. Create a new SyncClient to reuse this scope key.`,
+				);
+			}
 			const existing = entries.get(key);
 			if (existing) {
 				if (cfg !== undefined) {
@@ -304,6 +354,8 @@ export function createSync(config: SyncConfig): SyncClient {
 				entry.consumerSubs.clear();
 			}
 			entries.clear();
+			// Unsubscribe all engines before closing transport to prevent onBatch
+			// callbacks from firing on a draining transport after teardown begins.
 			transport.close();
 		},
 	};
