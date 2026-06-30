@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { createSync } from "../../src/client/create-sync.ts";
-import { ephemeral } from "../../src/core/types.ts";
+import { DURABLE, ephemeral } from "../../src/core/types.ts";
 import type { Change } from "../../src/core/types.ts";
 import { lww, vectorClock } from "../../src/strategies/index.ts";
 import { InProcessTransport } from "../../src/transports/in-process.ts";
@@ -553,6 +553,95 @@ describe("config.scopes pre-registration", () => {
 		expect(() =>
 			syncA.scope("pre-reg", { strategy: vectorClock("pre-a2") }),
 		).toThrow(/already registered/);
+
+		syncA.close();
+		syncB.close();
+	});
+});
+
+// ─── handle lifecycle ─────────────────────────────────────────────────────────
+
+describe("handle lifecycle", () => {
+	test("handle.set() throws after handle.close()", () => {
+		const t = new InProcessTransport();
+		const sync = createSync({ transport: t });
+		const handle = sync.scope("lifecycle", { strategy: lww(1) });
+		handle.close();
+		expect(() => handle.set("k", "v")).toThrow(/closed/);
+		sync.close();
+	});
+
+	test("handle.do() throws after handle.close()", () => {
+		const t = new InProcessTransport();
+		const sync = createSync({ transport: t });
+		const handle = sync.scope("lifecycle2", { strategy: lww(1) });
+		handle.close();
+		expect(() => handle.do("k", "v")).toThrow(/closed/);
+		sync.close();
+	});
+
+	test("handle.snapshot() throws after handle.close()", () => {
+		const t = new InProcessTransport();
+		const sync = createSync({ transport: t });
+		const handle = sync.scope("lifecycle3", { strategy: lww(1) });
+		handle.close();
+		expect(() => handle.snapshot()).toThrow(/closed/);
+		sync.close();
+	});
+
+	test("scope(closedKey) throws after handle.close()", () => {
+		const t = new InProcessTransport();
+		const sync = createSync({ transport: t });
+		sync.scope("tombstone", { strategy: lww(1) }).close();
+		expect(() => sync.scope("tombstone")).toThrow(
+			/closed.*cannot be re-registered/,
+		);
+		sync.close();
+	});
+});
+
+// ─── prevVersions drift regression ───────────────────────────────────────────
+
+describe("prevVersions drift regression", () => {
+	test("prevVersions advances after remote-win so next local set() is causally after", async () => {
+		const tA = new InProcessTransport();
+		const tB = new InProcessTransport();
+		tA.channelFn = (batch) => tB._deliver(batch);
+		tB.channelFn = (batch) => tA._deliver(batch);
+
+		const syncA = createSync({ transport: tA });
+		const syncB = createSync({ transport: tB });
+
+		const docA = syncA.scope("drift", {
+			strategy: vectorClock("drift-a"),
+			resolver: { resolve: (_c) => ({ decision: "take-remote" as const }) },
+			lifetime: DURABLE,
+		});
+		const docB = syncB.scope("drift", {
+			strategy: vectorClock("drift-b"),
+		});
+
+		// B writes first
+		docB.set("field", "b-first");
+		await new Promise((r) => setTimeout(r, 10));
+
+		// A writes concurrently (B's write arrives while A's is in-flight — resolver takes remote on A)
+		docA.set("field", "a-concurrent");
+		await new Promise((r) => setTimeout(r, 30));
+
+		// A now writes a third time — prevVersions must be based on the winning remote version
+		docA.set("field", "a-after");
+		await new Promise((r) => setTimeout(r, 30));
+
+		const snapA = await docA.snapshot();
+		const snapB = await docB.snapshot();
+
+		// A's third write ("a-after") should be causally after the winning version
+		// Both sides should have "a-after" as the latest value
+		const aField = snapA.find((c) => (c as Change).unit.key === "field");
+		const bField = snapB.find((c) => (c as Change).unit.key === "field");
+		expect(aField?.value).toBe("a-after");
+		expect(bField?.value).toBe("a-after");
 
 		syncA.close();
 		syncB.close();

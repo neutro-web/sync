@@ -42,6 +42,11 @@ export interface ScopeHandle {
 	do(unit: string, value: unknown, opts?: WriteOpts): void;
 	subscribe(onBatch: (changes: readonly Change[]) => void): Subscription;
 	snapshot(): Promise<readonly Change[]>;
+	/**
+	 * Register a handler for manual conflict resolution. Requires `manual: true` in ScopeConfig.
+	 * WARNING: In manual mode, unresolved conflicts accumulate in the engine's open-conflicts map
+	 * indefinitely. For bounded memory, call resolve() or take-local/take-remote on every conflict.
+	 */
 	onConflict(
 		handler: (conflict: Conflict, resolve: (r: Resolution) => void) => void,
 	): void;
@@ -72,6 +77,9 @@ interface ScopeEntry {
 export function createSync(config: SyncConfig): SyncClient {
 	const { transport } = config;
 	const entries = new Map<string, ScopeEntry>();
+	// closedKeys tombstones closed scope keys to prevent silent re-registration.
+	// Grows with scope churn for the client's lifetime; bounded by the number of unique
+	// scope keys ever registered on this client instance.
 	const closedKeys = new Set<string>();
 	let _seq = 0;
 	const _clientId = Math.random().toString(36).slice(2, 8);
@@ -101,6 +109,7 @@ export function createSync(config: SyncConfig): SyncClient {
 				(async () => {
 					const snap = await entry.engine.snapshot(entry.scopeObj);
 					if (myVersion !== entry.replayVersion) return; // superseded
+					if (closed) return; // client closed during snapshot await
 					// Ephemeral reconnect: resend the full snapshot. Note that these change ids
 					// were already forwarded via onBatch at write time (relay semantics). Peers
 					// that were connected deduplicate via seenIds and silently ignore them; peers
@@ -123,6 +132,7 @@ export function createSync(config: SyncConfig): SyncClient {
 						entry.scopeObj,
 						entry.lastCursor,
 					)) {
+						if (closed) break; // client closed during replay
 						if (myVersion !== entry.replayVersion) break; // superseded
 						await transport.send(batch);
 						// Track cursor after each successful send so mid-replay disconnect
@@ -153,6 +163,11 @@ export function createSync(config: SyncConfig): SyncClient {
 		};
 		entries.set(key, entry);
 
+		// N-1: Declare handleClosed before the closures below that capture it by reference.
+		// JS closures always reference the same variable — this is safe. Declared here (before
+		// engine.subscribe) so it appears before the onConflict closure that references it.
+		let handleClosed = false;
+
 		// Wire engine subscription for outbound transport + consumer fan-out
 		entry.engineSub = engine.subscribe(scopeObj, {
 			onBatch(batch: ChangeBatch): void {
@@ -164,6 +179,7 @@ export function createSync(config: SyncConfig): SyncClient {
 				// by origin to avoid redundant sends.
 				transport
 					.send(batch)
+					// Phase 5: replace with retry/backpressure queue (delivery-above-transport, charter §8).
 					.catch((err) => console.error("[createSync] send error:", err));
 				// Keep prevVersions in sync with engine-accepted state so future local
 				// mints start from the correct prev. Without this, a remote win would
@@ -187,13 +203,24 @@ export function createSync(config: SyncConfig): SyncClient {
 				// batch's snapshot — they receive subsequent batches only. This is by design.
 				// Snapshot consumerSubs to prevent mid-iteration mutation from unsubscribe-during-callback.
 				if (entry.consumerSubs.size > 0)
-					for (const cb of [...entry.consumerSubs]) cb(batch.changes);
+					for (const cb of [...entry.consumerSubs]) {
+						try {
+							cb(batch.changes);
+						} catch (err) {
+							console.error("[createSync] subscriber error:", err);
+						}
+					}
 			},
 			onConflict(conflict: Conflict): Resolution {
 				// Engine.onConflict is a notification-only hook (Model C): the return value is
 				// always ignored by the engine. We always return { decision: "defer" } as a
 				// protocol placeholder — resolution is driven by the separate resolveConflict()
 				// call, either from the consumer (manual mode) or from ResolverPump (auto mode).
+				// Auto mode: ResolverPump calls resolveConflict() after this notification returns.
+				// Manual mode: the consumer's resolve() callback calls resolveConflict() explicitly.
+				// NOTE (Axiom 4 partial gap): The engine's versioned-op concurrent path (engine.ts)
+				// silently holds the change without surfacing a Conflict. This is a known open gate
+				// for Phase 3. For the state path, Axiom 4 holds fully.
 				if (cfg.manual && entry.conflictHandler) {
 					// In manual mode, if the consumer never calls resolve(), the conflict stays
 					// open in the engine's openConflicts map indefinitely. This is by design —
@@ -214,8 +241,6 @@ export function createSync(config: SyncConfig): SyncClient {
 			entry.pump = new ResolverPump(engine, cfg.resolver, scopeObj);
 		}
 
-		let handleClosed = false;
-
 		const handle: ScopeHandle = {
 			set(unit: string, value: unknown, opts?: WriteOpts): void {
 				if (handleClosed)
@@ -224,6 +249,9 @@ export function createSync(config: SyncConfig): SyncClient {
 				const lifetime = opts?.lifetime ?? cfg.lifetime ?? DURABLE;
 				const prev = entry.prevVersions.get(unitKey);
 				const version = cfg.strategy.mint(prev);
+				// Update prevVersions synchronously so consecutive set() calls on the same unit
+				// mint causally-ordered versions (avoids spurious LWW same-tick or VC base-vector conflicts).
+				entry.prevVersions.set(unitKey, version);
 				engine
 					.apply({
 						scope: scopeObj,
@@ -239,11 +267,9 @@ export function createSync(config: SyncConfig): SyncClient {
 							},
 						],
 					})
-					.then(() => {
-						// Only record the minted version after the engine confirms acceptance.
-						// If apply() rejected, prevVersions retains the last known-good version.
-						entry.prevVersions.set(unitKey, version);
-					})
+					// Phase 5: replace with retry/backpressure queue (delivery-above-transport, charter §8).
+					// Note: .then() is intentionally omitted here. prevVersions is updated synchronously above.
+					// onBatch will further advance prevVersions if a remote write wins (only-advance guard there).
 					.catch((err) => console.error("[createSync] apply error:", err));
 			},
 
@@ -348,12 +374,12 @@ export function createSync(config: SyncConfig): SyncClient {
 
 		close(): void {
 			closed = true;
-			for (const entry of entries.values()) {
-				entry.engineSub.unsubscribe();
-				entry.pump?.dispose();
-				entry.consumerSubs.clear();
+			// Snapshot entries before iterating — each handle.close() mutates entries.
+			// Close each handle so handleClosed is set — prevents ghost writes on held references.
+			for (const entry of [...entries.values()]) {
+				entry.handle.close();
 			}
-			entries.clear();
+			// entries is now clear (each handle.close() calls entries.delete(key) + closedKeys.add(key))
 			// Unsubscribe all engines before closing transport to prevent onBatch
 			// callbacks from firing on a draining transport after teardown begins.
 			transport.close();
