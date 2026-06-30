@@ -12,7 +12,7 @@
  *     `"concurrent"` → deferred without marking the id seen).
  *   - `"op"` (no version): dedup by id only. Never double-applied.
  *   - `"op"` (with version): seenIds dedup, then version-compare on the unit.
- *     `"concurrent"` → deferred without marking the id seen (Phase 2 can re-route).
+ *     `"concurrent"` → Model C detect-and-hold, same as state (Phase B / B2).
  *
  * ## T2 — Version opacity
  * The engine never reads inside a `Version`. All versioning is delegated to
@@ -32,7 +32,11 @@
  * conflict in `openConflicts`, fires `onConflict` as a notification (return value
  * ignored), and returns `false` WITHOUT adding either id to `seenIds`. Resolution
  * is driven by `resolveConflict()` or via `ResolverPump`. The `_applyOp` concurrent
- * arm remains deferred.
+ * arm is live as of Phase B (B2): op-with-version storage carries the full
+ * `VersionedChange` (`opUnitChanges`, not just `Version`), so the same Model C
+ * detect-and-hold applies to the op path. Landing a winner is generalized by
+ * `change.kind` in `_landChange` — an op winner is written to `opUnitChanges`
+ * and never touches `durableStateUnits` / `ephemeralStateUnits`.
  *
  * ## T5 — Per-scope causal order
  * Subscriptions fire per scope in the order changes were accepted. No cross-scope
@@ -100,8 +104,15 @@ interface ScopeState {
 	 * Not persisted, not replayed.
 	 */
 	ephemeralStateUnits: Map<string, UnitEntry>;
-	/** Last accepted version per unit for op-with-version collision detection (T4). */
-	opUnitVersions: Map<string, Version>;
+	/**
+	 * Last accepted op-with-version per unit, full `VersionedChange` (B2-1, Phase B).
+	 * Carries the whole change, not just the version, so a `Conflict` payload can be
+	 * built on the op path the same way `_applyState` builds one from
+	 * `durableStateUnits`/`ephemeralStateUnits`. Op winners land here only — never
+	 * in the state-unit maps (T4 design fork: an op has no confirmed-state-unit
+	 * representation).
+	 */
+	opUnitChanges: Map<string, VersionedChange>;
 	/** Durable log for replay. Only durable changes. Monotonically ordered by seq. */
 	durableLog: LogEntry[];
 	/** Monotonic cursor sequence. Only durable changes advance this. */
@@ -243,22 +254,44 @@ export class Engine implements Feed, ScopeRouter {
 	private _applyOp(change: OpChange, scope: ScopeState): boolean {
 		if (change.version !== undefined) {
 			// Op-with-version: op-transport-with-local-fold path (T2 / T4).
-			const existingVersion = scope.opUnitVersions.get(change.unit.key);
-			if (existingVersion !== undefined) {
-				const cmp = this._clock.compare(change.version, existingVersion);
+			const versioned = change as OpChange & { version: Version };
+			const existing = scope.opUnitChanges.get(change.unit.key);
+			if (existing !== undefined) {
+				const cmp = this._clock.compare(versioned.version, existing.version);
 				if (cmp === "before") {
 					scope.seenIds.add(change.id.value); // stale: permanently block retries
 					return false;
 				}
 				if (cmp === "concurrent") {
-					// T4 deferred — op path stays deferred. Phase 3 will route (op path
-					// carries Version only, not VersionedChange; concurrent routing
-					// requires VersionedChange to build a Conflict payload).
-					// Do NOT add to seenIds — leave open for re-routing.
+					// Model C — detect-and-hold, live for the op path as of Phase B (B2).
+					// Mirrors _applyState exactly: record both competing VersionedChanges,
+					// fire onConflict as a notification, return synchronously WITHOUT
+					// adding either id to seenIds (last-confirmed-winner; re-routable).
+					const conflict: Conflict = {
+						unit: change.unit,
+						scope: change.scope,
+						local: existing,
+						remote: versioned,
+					};
+					scope.openConflicts.set(change.unit.key, {
+						local: existing,
+						remote: versioned,
+					});
+					for (const handlers of scope.subs) {
+						// Notification only — return value intentionally ignored (Model C).
+						try {
+							handlers.onConflict(conflict);
+						} catch (err) {
+							console.error(
+								"[Engine] onConflict handler threw; conflict held open:",
+								err,
+							);
+						}
+					}
 					return false;
 				}
 			}
-			scope.opUnitVersions.set(change.unit.key, change.version);
+			scope.opUnitChanges.set(change.unit.key, versioned);
 		}
 
 		// Accepted (pure-intent ops reach here directly; versioned ops after passing
@@ -424,17 +457,33 @@ export class Engine implements Feed, ScopeRouter {
 				open.local.version,
 				open.remote.version,
 			);
-			const mergedChange: StateChange = {
-				id: makeChangeId(
-					`merged:${open.local.id.value}:${open.remote.id.value}`,
-				),
-				kind: "state",
-				scope,
-				unit,
-				value: resolution.value,
-				version: mergedVersion,
-				lifetime: open.local.lifetime,
-			};
+			const mergedId = makeChangeId(
+				`merged:${open.local.id.value}:${open.remote.id.value}`,
+			);
+			// Generalized by change.kind (B2 design fork) — a merged change preserves
+			// whichever kind the conflicting pair was (open.local.kind === open.remote.kind
+			// always; both sides of one openConflicts entry are the same conflict-unit's
+			// competing writes, which share a kind by construction in _applyState/_applyOp).
+			const mergedChange: VersionedChange =
+				open.local.kind === "state"
+					? {
+							id: mergedId,
+							kind: "state",
+							scope,
+							unit,
+							value: resolution.value,
+							version: mergedVersion,
+							lifetime: open.local.lifetime,
+						}
+					: {
+							id: mergedId,
+							kind: "op",
+							scope,
+							unit,
+							value: resolution.value,
+							version: mergedVersion,
+							lifetime: open.local.lifetime,
+						};
 			scopeState.openConflicts.delete(unit.key);
 			scopeState.seenIds.add(open.local.id.value);
 			scopeState.seenIds.add(open.remote.id.value);
@@ -454,26 +503,41 @@ export class Engine implements Feed, ScopeRouter {
 		}
 
 		// take-remote: land the remote change directly into the confirmed maps.
-		this._landChange(open.remote as StateChange, scopeState, scope, unit.key);
+		this._landChange(open.remote, scopeState, scope, unit.key);
 	}
 
 	// ---- Private ------------------------------------------------------------
 
-	// Single "land a StateChange" primitive — avoids duplicating the durable/ephemeral
+	// Single "land a Change" primitive — avoids duplicating the durable/ephemeral
 	// routing + cursor advance + onBatch fire across every resolveConflict arm.
+	// Generalized by change.kind (B2): a state winner lands in durableStateUnits /
+	// ephemeralStateUnits exactly as before; an op winner lands in opUnitChanges
+	// and NEVER touches the state-unit maps (T4 design fork — an op has no
+	// confirmed-state-unit representation; routing it through the state maps would
+	// corrupt them).
 	private _landChange(
-		change: StateChange,
+		change: VersionedChange,
 		scopeState: ScopeState,
 		scope: Scope,
 		unitKey: string,
 	): void {
 		const durable = change.lifetime.class === "durable";
-		if (durable) {
-			scopeState.durableStateUnits.set(unitKey, { change });
-			scopeState.cursorSeq++;
-			scopeState.durableLog.push({ change, seq: scopeState.cursorSeq });
+		if (change.kind === "state") {
+			if (durable) {
+				scopeState.durableStateUnits.set(unitKey, { change });
+				scopeState.cursorSeq++;
+				scopeState.durableLog.push({ change, seq: scopeState.cursorSeq });
+			} else {
+				scopeState.ephemeralStateUnits.set(unitKey, { change });
+			}
 		} else {
-			scopeState.ephemeralStateUnits.set(unitKey, { change });
+			// op-with-version winner: opUnitChanges only, never the state maps.
+			scopeState.opUnitChanges.set(unitKey, change);
+			if (durable) {
+				scopeState.cursorSeq++;
+				scopeState.durableLog.push({ change, seq: scopeState.cursorSeq });
+			}
+			// ephemeral op: opUnitChanges updated only; cursor/log untouched (T3).
 		}
 		const cursor = durable
 			? makeCursor(scope, scopeState.cursorSeq)
@@ -494,7 +558,7 @@ export class Engine implements Feed, ScopeRouter {
 			this._scopes.set(key, {
 				durableStateUnits: new Map(),
 				ephemeralStateUnits: new Map(),
-				opUnitVersions: new Map(),
+				opUnitChanges: new Map(),
 				durableLog: [],
 				cursorSeq: 0,
 				subs: new Set(),
