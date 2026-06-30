@@ -25,7 +25,7 @@
 
 ## Current State
 
-_Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 complete; G2 Public API surface resolved, implemented, automated, and locked.
+_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 complete; G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (not closed).
 
 ### Status at a glance
 - **Seam contract:** v1.1. T1–T5 ratified; eight seam types defined; §9 consumer map
@@ -33,11 +33,12 @@ _Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional meth
   optional method (2026-06-29). Founding semantics otherwise unchanged.
 - **Governance scaffold:** Complete. Charter, custom instructions, AGENTS.md, decision log,
   implementation-state all in place.
-- **Code:** Phase 3 + G2 Public API complete. `createSync` client + `ScopeHandle` (`set`/`do`/
-  `subscribe`/`snapshot`/`onConflict`/`close`), per-scope config via client multiplexing (B1),
-  auto-resolution default, full T3 reconnect fork in the client. Pure-additive — core engine/types
-  bytewise unchanged. Token-leak gate automated + mutation-verified. **109 tests passing**;
-  `tsc --noEmit` clean. HEAD `d21f26d`.
+- **Code:** Phase 3 + G2 Public API complete. Phase B: B2 (`_applyOp` concurrent routing
+  via Model C, op storage carries full `VersionedChange`) and B1 (`CRDTPositionStrategy`
+  — closes the charter Phase 2 "three strategies" letter gap) landed and locked. B3
+  surfaced a confirmed defect in the client's durable reconnect-replay branch (see Log,
+  2026-06-30) — NOT closed. **130 tests passing** (109 pre-existing + 5 B2 + 13 B1 + 3
+  B3-finding); `tsc --noEmit` clean; lint clean. HEAD `5f6be03`.
 
 ### Locked (do not drift without an explicit superseding entry)
 - **Standalone** — `ns` has no dependency on any neutro sibling. No `neutro/*` runtime import
@@ -75,6 +76,15 @@ _Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional meth
   max (causal join, no local-slot increment) — deterministic, order-independent, dominating.
   Engine guard: `merged` arm throws a precise error if `mergeVersions` absent. Propagated
   resolution deferred. **Implementation complete (Phase 3).** C1–C7 gate verified; 55 tests passing. See 2026-06-29 Phase 3 entry.
+- **`_applyOp` concurrent routing — Model C activated [Phase B / B2]** — op-with-version
+  storage (`opUnitChanges`) carries the full `VersionedChange`, not just `Version`; the
+  op path's `concurrent` arm now detects-and-holds exactly like the state path, and
+  `resolveConflict`'s landing is generalized by `change.kind` (an op winner lands in
+  `opUnitChanges` only, never the state-unit maps). See 2026-06-30 Phase B / B2 entry.
+- **`CRDTPositionStrategy` — third Phase 2 strategy landed [Phase B / B1]** —
+  position-ordered `ClockStrategy`; scope boundary named (not a full sequence CRDT — see
+  2026-06-30 Phase B / B1 entry). Closes the charter §8 Phase 2 "three strategies" letter
+  gap.
 - **Public API shape [LOCKED — G2]** — `createSync(config)` → client; `client.scope(key, cfg)` →
   handle; `set`/`do`/`subscribe`/`snapshot`/`onConflict(manual)`/`close`. Per-scope config via client
   multiplexing one `Engine` per scope-config (no engine change). Transport bridged in the client; T3
@@ -85,20 +95,25 @@ _Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional meth
 ### Open gates (surfaced, NOT decided — do not build past)
 - **G3 — LCD-risk proof**: demonstrate the universal seam isn't worse than a purpose-built
   engine per consumer. Addressed by the conformance suite; not blocking early phases.
-- **G2-6d — superseded by B3 finding** — see below. Do not re-open as-written.
-- **B3 — durable reconnect recovery (confirmed defect; Phase 5 design decision required)**:
-  The `transport.onConnect()` durable-replay branch in `create-sync.ts` cannot recover missed
-  changes under any sequence of events. Two independent root causes confirmed (see
-  2026-06-30 B3 entry). Fixing requires a Phase 5 design decision on `lastCursor` advancement
-  semantics and/or an explicit pull-based catch-up seam — both touch the §7
-  delivery-above-transport boundary already deferred to Phase 5. Current behavior is
-  characterized and regression-trip-wired in `test/client/reconnect.test.ts` (3 tests, green).
+- **G2-6d-bis — durable reconnect-replay is structurally inert** (sandbox; deterministic,
+  confirmed by execution): `entry.lastCursor` is updated synchronously in the same
+  `onBatch` callback that grows the durable log, so it never lags the log at the moment
+  `onConnect` fires — `engine.changes(scope, lastCursor)` always yields zero batches.
+  Even with a lag, the mechanism only republishes THIS engine's own log, not a peer's —
+  it cannot recover a peer's missed writes under any `lastCursor` semantics. Fix requires
+  deciding when `lastCursor` advances (tied to confirmed delivery, not durable accept)
+  and/or a pull-based catch-up seam — both are §7 delivery-above-transport territory,
+  Phase 5. Not blocking Phase B close; blocks any future claim that reconnect-replay
+  works. See 2026-06-30 Phase B / B3 entry.
 
 ### Superseded / resolved
 - **G1 — Substrate** — RESOLVED 2026-06-24: `ns` is standalone (option a).
 - **G2 — Public API surface** — RESOLVED 2026-06-29: designed + implemented + automated, pure-additive
   over seam v1.1, mutation-verified leak gate. Clean on every path G2 owns; the `_applyOp` concurrent
   gap is pre-existing (Phase 3 sub-gate), not a G2 caveat. See 2026-06-29 G2 close-out entry.
+- **Charter §8 Phase 2 "three strategies" letter gap** — RESOLVED 2026-06-30: LWW +
+  vector-clock + `CRDTPositionStrategy` (scope-bounded, see Phase B / B1 entry) are all
+  landed; the literal exit condition is now met.
 
 ---
 
@@ -627,56 +642,121 @@ left open there are resolved by the `set`/`do` surface.
 
 ---
 
-### 2026-06-30 — Phase B sandbox gaps: B1 (CRDTPositionStrategy), B2 (_applyOp concurrent routing), B3 (durable reconnect finding)
+### 2026-06-30 — Phase B / B2: `_applyOp` concurrent routing activated [LOCKED]
 
-**B2 — `_applyOp` concurrent routing through Model C [LOCKED].**
-`ScopeState.opUnitVersions: Map<string, Version>` → `opUnitChanges: Map<string, VersionedChange>`.
-The `_applyOp` concurrent arm now mirrors `_applyState` exactly: builds a `Conflict`, populates
-`openConflicts`, fires `onConflict`, returns without marking either id seen. `_landChange`
-generalized by `change.kind` — op winner routes to `opUnitChanges` only (never the state maps);
-`resolveConflict`'s `merged` arm constructs a same-kind merged change. 2-replica convergence under
-fault injection proven for the op path (B2-4). Pure-intent ops (no version) unaffected (B2-5).
-Gate: `test/engine/phaseB-op-conflict.test.ts` (5 tests). No seam change. T1–T5 unaffected.
+**Gate:** `docs/gates/phaseB-sandbox-gaps.md`, Group B2 (B2-1..B2-5). Engine-internal;
+no seam change, no T1–T5 change.
 
-**B1 — `CRDTPositionStrategy` (position-ordered ClockStrategy) [LOCKED].**
-Closes the Phase 2 "three strategies" gap (LWW + vector-clock + CRDT-position). Scope boundary
-explicitly documented: sufficient to exercise the seq-position version space and prove convergence;
-NOT a full production sequence CRDT (no tombstone GC, no RGA block encoding, no true
-between-two-neighbors fractional allocation — `ClockStrategy.mint(prev?)` takes one reference, not
-a `(before, after)` pair). Version shape: `{ _path: number[], _node: string }` (Dewey-decimal).
-`compare()`: lexicographic total order on distinct paths; `concurrent` only on equal path from a
-different `_node`. `mergeVersions()`: `[...basePath, tagMin, tagMax]` where `tagMin`/`tagMax` are
-derived from FNV-1a hashes of the INPUT versions' `_node` fields — never `this._nodeId` (explicit
-rejection of the max-then-local-increment trap named in the 2026-06-29 merge decision). Replica-
-identical: two different strategy instances computing `mergeVersions(a, b)` produce `compare`-equal
-results (tested in B1-3 with two DIFFERENT strategy instances, not the same one).
-Gate: `test/strategies/crdt-position.test.ts` (13 tests: B1-2 through B1-5).
-`crdtPosition(nodeId)` factory in `src/strategies/index.ts`; public barrel (`src/index.ts`) untouched.
+`ScopeState.opUnitVersions: Map<string, Version>` replaced by `opUnitChanges:
+Map<string, VersionedChange>` (B2-1) — op-with-version storage now carries the full
+change, not just the version, so a `Conflict` payload can be built on the op path the
+same way `_applyState` builds one from the state-unit maps. `_applyOp`'s `concurrent`
+arm now mirrors `_applyState`'s Model C detect-and-hold exactly: records
+`{local, remote}` in `openConflicts`, fires `onConflict`, returns without marking
+either id seen (B2-2).
 
-**B3 — durable reconnect finding [OPEN — confirmed defect, Phase 5 design required].**
-G2-6d set out to test the `transport.onConnect()` durable-replay branch in `create-sync.ts`.
-Executing (not just reading) the branch surfaced a confirmed defect: **the branch can never replay
-anything, under any sequence of events.**
+**Design fork resolved (engine-internal, in-stream):** `_landChange` is generalized by
+`change.kind`. A state winner lands in `durableStateUnits`/`ephemeralStateUnits`
+exactly as before; an op winner lands in `opUnitChanges` only and never touches the
+state-unit maps — an op has no confirmed-state-unit representation, and routing one
+through the state maps would corrupt them. `resolveConflict`'s `merged` arm now
+constructs the merged change with the correct `kind` (state or op), matching
+`open.local.kind` (both sides of one `openConflicts` entry always share a kind, since
+an entry is created exclusively from either `_applyState` or `_applyOp`, never mixed).
 
-Root cause 1: `entry.lastCursor` is updated synchronously inside the same `onBatch` callback that
-is the only path by which a durable change enters the engine's log. There is no window where
-`lastCursor` lags the log it checkpoints. At `onConnect` time, `lastCursor` always equals the
-engine's own cursor exactly, so `engine.changes(scope, lastCursor)` yields zero batches.
+`take-remote`/`merged` now route op conflicts onto the op path end-to-end (B2-3);
+2-replica op convergence proven under fault injection via `ResolverPump` + a
+deterministic pick-by-id resolver (B2-4); pure-intent (versionless) ops remain
+id-dedup-only and unaffected (B2-5). 5 new tests in
+`test/engine/phaseB-op-conflict.test.ts`. `tsc --noEmit` clean; `test/harness/`
+untouched.
 
-Root cause 2 (independent): even if `lastCursor` did lag, the mechanism is a self-republish of
-THIS engine's own log. It cannot recover changes that landed only on a PEER — only the sender (A)
-can re-publish missed writes on ITS reconnect, which requires A's `lastCursor` to track "confirmed
-delivered to this peer," not "durably accepted into my own log." That is delivery-above-transport
-(seam contract §7), already Phase 5.
+**Supersedes:** the 2026-06-28 consolidation line "`_applyOp` concurrent routing
+confirmed Phase 3" and the "out of scope" note on `_applyOp` in the 2026-06-29 `merged`
+decision — both are resolved by this entry.
 
-This is NOT the "persistent cursor" finding anticipated — no restart is involved; reproduces
-in-memory in a single process. Per `AGENTS.md` halt-at-an-undecided-design-gate: not silently
-patched. The fix requires Phase 5 design decisions on `lastCursor` advancement semantics and/or a
-pull-based catch-up seam.
+---
 
-Current behavior characterized + regression-trip-wired in `test/client/reconnect.test.ts` (3 tests,
-green, deliberately asserting the defect). G2-6d does NOT close; superseded by the B3 open gate in
-Current State.
+### 2026-06-30 — Phase B / B1: CRDT-position strategy landed; charter Phase 2 letter gap closed [LOCKED]
 
-**Test counts:** 130/130 total (109 pre-G2 + 5 B2 + 13 B1 + 3 B3). `tsc --noEmit` clean.
-HEAD: see `git log --oneline -3`.
+**Gate:** `docs/gates/phaseB-sandbox-gaps.md`, Group B1 (B1-1..B1-5). New strategy;
+strategies-subpath only. No seam change.
+
+`charter.md` §8's Phase 2 exit names three strategies (LWW, logical/hybrid clock,
+CRDT-position); only LWW and vector-clock existed prior to this session —
+`implementation-state.md` listed CRDT-position as "Phase 3+" without this gap ever
+being logged against the charter letter. This entry closes that gap and logs the
+deferral that preceded it.
+
+**`CRDTPositionStrategy`** (`src/strategies/crdt-position.ts`), exported via
+`crdtPosition(nodeId)` from `src/strategies/index.ts` (strategies subpath only — the
+G2 public barrel `src/index.ts`, mutation-tested by the token-leak gate, is untouched).
+
+**Scope boundary (state explicitly, so "CRDT-position exists" is not over-read):** a
+position-ordered `ClockStrategy` sufficient to exercise the seq-position version space
+(seam contract §9's `rich text / canvas` row) and prove convergence on the existing
+harness — NOT a full production sequence CRDT. No tombstone GC, no block-wise RGA
+encoding, no rich-text document model, no true between-two-neighbors fractional
+allocation (`ClockStrategy.mint(prev?)` takes one reference point, not a `(before,
+after)` pair — a real sequence CRDT needs a richer insert primitive than this seam
+provides). A fuller sequence CRDT, if ever needed, is a separate later gate.
+
+Version shape: `{ _path: number[], _node: string }`, a Dewey-decimal-style position
+path. `compare()` is a lexicographic total order on distinct paths (antisymmetric,
+transitive — B1-2); `concurrent` arises only on an exactly-equal path from a different
+`_node` (a genuine same-position collision, surfaced rather than silently tie-broken
+like LWW). `mergeVersions()` extends the dominating path with a tag derived
+symmetrically from BOTH inputs' `_node` fields — never the calling instance's own node
+id — which is the explicit rejection of the max-then-local-increment trap named in the
+2026-06-29 merge decision; proven replica-identical by merging the same pair on two
+DIFFERENT strategy instances, not just twice on one (B1-3). 2-replica convergence
+proven on both the state path (B1-4) and the op path (B1-5, depends on B2). 13 new
+tests in `test/strategies/crdt-position.test.ts`.
+
+**Supersedes:** implicitly resolves the unlogged deferral noted in
+`implementation-state.md`'s "CRDT-position strategy | — | Phase 3+" row.
+
+---
+
+### 2026-06-30 — Phase B / B3: G2-6d does NOT close — confirmed defect in the durable reconnect-replay branch [FINDING — new gate opened]
+
+**Gate:** `docs/gates/phaseB-sandbox-gaps.md`, Group B3 (B3-1). **Outcome: the gate
+item's literal aim is NOT met. This is a finding, not a closure — surfaced per
+AGENTS.md halt-at-an-undecided-design-gate, not silently fixed.**
+
+B3-1 set out to write a test firing `transport.onConnect()` for real (the prior "G2-6d"
+test in `test/client/create-sync.test.ts` bypasses `onConnect` entirely via direct
+`tB._deliver()` calls) and assert that the client's durable replay-from-cursor fork
+recovers changes a peer missed during a disconnect. Executing that test — not just
+reading the code — surfaces a confirmed defect:
+
+**The durable replay branch in `create-sync.ts`'s `transport.onConnect()` handler can
+never replay anything, under any sequence of events.** Root cause: `entry.lastCursor`
+is updated synchronously and unconditionally inside the SAME `onBatch` callback that is
+the only path by which a durable change enters `entry.engine`'s durable log — for both
+local writes (`set()`/`do()`) and remote-received ones (`transport.receive ->
+engine.apply`). There is no code path where the engine's cursor advances without
+`lastCursor` advancing in the same synchronous step, so at the moment `onConnect`
+fires, `lastCursor` always exactly equals `engine.getCursor(scope)`, and
+`engine.changes(scope, lastCursor)` always yields zero batches. A second, independent
+problem: even with a lag, the mechanism is a self-republish (broadcast) of THIS
+engine's own log, not a pull from a peer — so a reconnecting client can never recover
+a PEER's missed writes regardless of `lastCursor` semantics; only the original sender's
+own reconnect could, and the sender's `lastCursor` advances at write time regardless of
+delivery success.
+
+This is **not** the "persistent cursor" finding the gate file anticipated — no restart
+is involved; reproduces in a single in-memory process. Per `AGENTS.md`
+halt-at-an-undecided-design-gate: not silently patched. The fix requires deciding
+*when* `lastCursor` should advance (tied to confirmed delivery, not durable accept)
+and/or adding an explicit pull-based catch-up seam — both touch the seam contract §7
+delivery-above-transport boundary, already deferred to Phase 5 ("transport.send
+retry/backpressure/ack"). Not invented or silently patched in this session.
+
+3 tests in `test/client/reconnect.test.ts` — a deliberate characterization of CURRENT,
+verified behavior (a regression trip-wire on the finding, kept green on purpose), not a
+passing closure of G2-6d.
+
+**Supersedes:** the framing of G2-6d in the 2026-06-29 G2 close-out entry ("the durable
+replay branch ... is live code but is not triggered by any current test") — it is now
+known to be untriggerable-to-any-effect, not merely untested.
