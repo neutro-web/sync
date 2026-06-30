@@ -1,5 +1,6 @@
 // src/client/create-sync.ts  (full replacement)
 import { Engine } from "../core/engine.ts";
+import type { PersistenceStore } from "../core/persistence.ts";
 import { ResolverPump } from "../core/resolver-pump.ts";
 import {
 	type Change,
@@ -30,6 +31,7 @@ export interface ScopeConfig {
 export interface SyncConfig {
 	transport: Transport;
 	scopes?: Record<string, ScopeConfig>;
+	store?: PersistenceStore;
 }
 
 export interface WriteOpts {
@@ -146,7 +148,10 @@ export function createSync(config: SyncConfig): SyncClient {
 
 	function _buildHandle(key: string, cfg: ScopeConfig): ScopeHandle {
 		const scopeObj = makeScope(key);
-		const engine = new Engine(cfg.strategy);
+		const engine = new Engine(cfg.strategy, {
+			resolver: cfg.resolver,
+			store: config.store,
+		});
 
 		const entry: ScopeEntry = {
 			engine,

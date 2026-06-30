@@ -49,6 +49,7 @@
  * from one engine is NOT safe to use as input to another engine's `changes()`.
  */
 
+import type { PersistenceStore } from "./persistence.ts";
 import {
 	type Change,
 	type ChangeBatch,
@@ -145,12 +146,69 @@ interface ScopeState {
 export class Engine implements Feed, ScopeRouter {
 	private readonly _clock: ClockStrategy;
 	private readonly _resolver?: Resolver;
+	private readonly _store?: PersistenceStore;
+	private readonly _chunkSize: number;
 	/** Per-scope state. Created lazily on first use. */
 	private readonly _scopes = new Map<string, ScopeState>();
 
-	constructor(clock: ClockStrategy, resolver?: Resolver) {
+	constructor(
+		clock: ClockStrategy,
+		opts?: {
+			resolver?: Resolver;
+			store?: PersistenceStore;
+			chunkSize?: number;
+		},
+	) {
 		this._clock = clock;
-		this._resolver = resolver;
+		this._resolver = opts?.resolver;
+		this._store = opts?.store;
+		this._chunkSize = opts?.chunkSize ?? Number.MAX_SAFE_INTEGER;
+	}
+
+	/**
+	 * Restore a scope's durable state from the persistence store. Must be called
+	 * and awaited before any apply()/subscribe()/changes()/snapshot() on this scope
+	 * when a store is configured. No-op if no store is configured or scope already
+	 * loaded.
+	 *
+	 * Cursor is read from the store directly rather than recomputed from replay.
+	 * All persisted ids are marked in seenIds (cursor-gated D0 strategy).
+	 */
+	async hydrateScope(scope: Scope): Promise<void> {
+		if (!this._store || this._scopes.has(scope.key)) return;
+		const key = scope.key;
+		const [records, storedCursor] = await Promise.all([
+			this._store.readChanges(key),
+			this._store.readCursor(key),
+		]);
+		const state: ScopeState = {
+			durableStateUnits: new Map(),
+			ephemeralStateUnits: new Map(),
+			opUnitChanges: new Map(),
+			durableLog: [],
+			cursorSeq: storedCursor ?? 0,
+			subs: new Set(),
+			seenIds: new Set(),
+			openConflicts: new Map(),
+		};
+		for (const { change, seq } of records) {
+			state.durableLog.push({ change, seq });
+			if (change.kind === "state") {
+				state.durableStateUnits.set(change.unit.key, {
+					change: change as StateChange,
+				});
+			} else if ((change as OpChange).version !== undefined) {
+				state.opUnitChanges.set(change.unit.key, change as VersionedChange);
+			}
+			// Mark all persisted ids seen so seenIds dedup works correctly post-hydration (D0-b).
+			state.seenIds.add(change.id.value);
+		}
+		// If cursor was never explicitly persisted but records exist, derive from last seq.
+		if (storedCursor === null && records.length > 0) {
+			// biome-ignore lint/style/noNonNullAssertion: records.length > 0 guarded above
+			state.cursorSeq = records[records.length - 1]!.seq;
+		}
+		this._scopes.set(key, state);
 	}
 
 	// ---- Feed.apply ---------------------------------------------------------
@@ -244,6 +302,16 @@ export class Engine implements Feed, ScopeRouter {
 			scope.durableStateUnits.set(change.unit.key, { change });
 			scope.cursorSeq++;
 			scope.durableLog.push({ change, seq: scope.cursorSeq });
+			if (this._store) {
+				const k = change.scope.key;
+				const seq = scope.cursorSeq;
+				void this._store
+					.appendChange(k, { change, seq })
+					.catch((err) => console.error("[Engine] store write:", err));
+				void this._store
+					.writeCursor(k, seq)
+					.catch((err) => console.error("[Engine] store cursor:", err));
+			}
 		} else {
 			scope.ephemeralStateUnits.set(change.unit.key, { change });
 		}
@@ -302,6 +370,16 @@ export class Engine implements Feed, ScopeRouter {
 		if (change.lifetime.class === "durable") {
 			scope.cursorSeq++;
 			scope.durableLog.push({ change, seq: scope.cursorSeq });
+			if (this._store) {
+				const k = change.scope.key;
+				const seq = scope.cursorSeq;
+				void this._store
+					.appendChange(k, { change, seq })
+					.catch((err) => console.error("[Engine] store write:", err));
+				void this._store
+					.writeCursor(k, seq)
+					.catch((err) => console.error("[Engine] store cursor:", err));
+			}
 		}
 
 		return true;
@@ -338,13 +416,16 @@ export class Engine implements Feed, ScopeRouter {
 		const entries = scopeState.durableLog.filter((e) => e.seq > sinceSeq);
 		if (entries.length === 0) return;
 
-		// biome-ignore lint/style/noNonNullAssertion: entries.length > 0 guarded above
-		const lastSeq = entries[entries.length - 1]!.seq;
-		yield {
-			scope,
-			changes: entries.map((e) => e.change),
-			cursor: makeCursor(scope, lastSeq),
-		};
+		for (let i = 0; i < entries.length; i += this._chunkSize) {
+			const chunk = entries.slice(i, i + this._chunkSize);
+			// biome-ignore lint/style/noNonNullAssertion: chunk is non-empty by slice bounds
+			const lastSeq = chunk[chunk.length - 1]!.seq;
+			yield {
+				scope,
+				changes: chunk.map((e) => e.change),
+				cursor: makeCursor(scope, lastSeq),
+			};
+		}
 	}
 
 	// ---- Feed.snapshot ------------------------------------------------------
@@ -527,6 +608,16 @@ export class Engine implements Feed, ScopeRouter {
 				scopeState.durableStateUnits.set(unitKey, { change });
 				scopeState.cursorSeq++;
 				scopeState.durableLog.push({ change, seq: scopeState.cursorSeq });
+				if (this._store) {
+					const k = scope.key;
+					const seq = scopeState.cursorSeq;
+					void this._store
+						.appendChange(k, { change, seq })
+						.catch((err) => console.error("[Engine] store write:", err));
+					void this._store
+						.writeCursor(k, seq)
+						.catch((err) => console.error("[Engine] store cursor:", err));
+				}
 			} else {
 				scopeState.ephemeralStateUnits.set(unitKey, { change });
 			}
@@ -536,6 +627,16 @@ export class Engine implements Feed, ScopeRouter {
 			if (durable) {
 				scopeState.cursorSeq++;
 				scopeState.durableLog.push({ change, seq: scopeState.cursorSeq });
+				if (this._store) {
+					const k = scope.key;
+					const seq = scopeState.cursorSeq;
+					void this._store
+						.appendChange(k, { change, seq })
+						.catch((err) => console.error("[Engine] store write:", err));
+					void this._store
+						.writeCursor(k, seq)
+						.catch((err) => console.error("[Engine] store cursor:", err));
+				}
 			}
 			// ephemeral op: opUnitChanges updated only; cursor/log untouched (T3).
 		}

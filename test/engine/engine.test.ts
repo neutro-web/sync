@@ -530,8 +530,12 @@ describe("P5 · LWW take-by-version: Resolver is never invoked", () => {
 			},
 		};
 
-		const engine0 = new Engine(new LWWClockStrategy(), throwingResolver);
-		const engine1 = new Engine(new LWWClockStrategy(), throwingResolver);
+		const engine0 = new Engine(new LWWClockStrategy(), {
+			resolver: throwingResolver,
+		});
+		const engine1 = new Engine(new LWWClockStrategy(), {
+			resolver: throwingResolver,
+		});
 
 		const { allChannels, throwIfErrors } = setupGossip(
 			[engine0, engine1],
