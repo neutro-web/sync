@@ -85,9 +85,14 @@ _Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional meth
 ### Open gates (surfaced, NOT decided — do not build past)
 - **G3 — LCD-risk proof**: demonstrate the universal seam isn't worse than a purpose-built
   engine per consumer. Addressed by the conformance suite; not blocking early phases.
-- **G2-6d — client T3 durable-fork test** (sandbox; deterministic): the durable replay branch in
-  `create-sync.ts` has no test firing `transport.onConnect()`. Not blocking; schedule in the next
-  runtime/integration pass.
+- **G2-6d — superseded by B3 finding** — see below. Do not re-open as-written.
+- **B3 — durable reconnect recovery (confirmed defect; Phase 5 design decision required)**:
+  The `transport.onConnect()` durable-replay branch in `create-sync.ts` cannot recover missed
+  changes under any sequence of events. Two independent root causes confirmed (see
+  2026-06-30 B3 entry). Fixing requires a Phase 5 design decision on `lastCursor` advancement
+  semantics and/or an explicit pull-based catch-up seam — both touch the §7
+  delivery-above-transport boundary already deferred to Phase 5. Current behavior is
+  characterized and regression-trip-wired in `test/client/reconnect.test.ts` (3 tests, green).
 
 ### Superseded / resolved
 - **G1 — Substrate** — RESOLVED 2026-06-24: `ns` is standalone (option a).
@@ -613,10 +618,65 @@ caveat. Recorded here to prevent re-attribution.
 left open there are resolved by the `set`/`do` surface.
 
 **Open follow-ups (deferred, not blocking G2 closure):**
-- **G2-6d — client-side T3 durable-fork has no `onConnect`-firing test.** The durable replay branch
-  in `create-sync.ts` is live code; the existing reconnect test exercises engine-level dedup via
-  `_deliver`, not the client's `transport.onConnect()` fork. Tracked as an open gate in Current State.
+- **G2-6d — superseded by B3 finding (2026-06-30).** The durable replay branch is not just
+  untested — it is structurally inert. See B3 entry below.
 - **Persistent cursor (Phase 3)** — `lastCursor` is in-memory; process restart replays from log start.
 - **Delivery above transport (Phase 5)** — `transport.send` `.catch()` sites are the
   retry/backpressure/ack seam; identified, not built.
 - **`closedKeys` unbounded growth (Phase 5)** — acceptable at current scope cardinality.
+
+---
+
+### 2026-06-30 — Phase B sandbox gaps: B1 (CRDTPositionStrategy), B2 (_applyOp concurrent routing), B3 (durable reconnect finding)
+
+**B2 — `_applyOp` concurrent routing through Model C [LOCKED].**
+`ScopeState.opUnitVersions: Map<string, Version>` → `opUnitChanges: Map<string, VersionedChange>`.
+The `_applyOp` concurrent arm now mirrors `_applyState` exactly: builds a `Conflict`, populates
+`openConflicts`, fires `onConflict`, returns without marking either id seen. `_landChange`
+generalized by `change.kind` — op winner routes to `opUnitChanges` only (never the state maps);
+`resolveConflict`'s `merged` arm constructs a same-kind merged change. 2-replica convergence under
+fault injection proven for the op path (B2-4). Pure-intent ops (no version) unaffected (B2-5).
+Gate: `test/engine/phaseB-op-conflict.test.ts` (5 tests). No seam change. T1–T5 unaffected.
+
+**B1 — `CRDTPositionStrategy` (position-ordered ClockStrategy) [LOCKED].**
+Closes the Phase 2 "three strategies" gap (LWW + vector-clock + CRDT-position). Scope boundary
+explicitly documented: sufficient to exercise the seq-position version space and prove convergence;
+NOT a full production sequence CRDT (no tombstone GC, no RGA block encoding, no true
+between-two-neighbors fractional allocation — `ClockStrategy.mint(prev?)` takes one reference, not
+a `(before, after)` pair). Version shape: `{ _path: number[], _node: string }` (Dewey-decimal).
+`compare()`: lexicographic total order on distinct paths; `concurrent` only on equal path from a
+different `_node`. `mergeVersions()`: `[...basePath, tagMin, tagMax]` where `tagMin`/`tagMax` are
+derived from FNV-1a hashes of the INPUT versions' `_node` fields — never `this._nodeId` (explicit
+rejection of the max-then-local-increment trap named in the 2026-06-29 merge decision). Replica-
+identical: two different strategy instances computing `mergeVersions(a, b)` produce `compare`-equal
+results (tested in B1-3 with two DIFFERENT strategy instances, not the same one).
+Gate: `test/strategies/crdt-position.test.ts` (13 tests: B1-2 through B1-5).
+`crdtPosition(nodeId)` factory in `src/strategies/index.ts`; public barrel (`src/index.ts`) untouched.
+
+**B3 — durable reconnect finding [OPEN — confirmed defect, Phase 5 design required].**
+G2-6d set out to test the `transport.onConnect()` durable-replay branch in `create-sync.ts`.
+Executing (not just reading) the branch surfaced a confirmed defect: **the branch can never replay
+anything, under any sequence of events.**
+
+Root cause 1: `entry.lastCursor` is updated synchronously inside the same `onBatch` callback that
+is the only path by which a durable change enters the engine's log. There is no window where
+`lastCursor` lags the log it checkpoints. At `onConnect` time, `lastCursor` always equals the
+engine's own cursor exactly, so `engine.changes(scope, lastCursor)` yields zero batches.
+
+Root cause 2 (independent): even if `lastCursor` did lag, the mechanism is a self-republish of
+THIS engine's own log. It cannot recover changes that landed only on a PEER — only the sender (A)
+can re-publish missed writes on ITS reconnect, which requires A's `lastCursor` to track "confirmed
+delivered to this peer," not "durably accepted into my own log." That is delivery-above-transport
+(seam contract §7), already Phase 5.
+
+This is NOT the "persistent cursor" finding anticipated — no restart is involved; reproduces
+in-memory in a single process. Per `AGENTS.md` halt-at-an-undecided-design-gate: not silently
+patched. The fix requires Phase 5 design decisions on `lastCursor` advancement semantics and/or a
+pull-based catch-up seam.
+
+Current behavior characterized + regression-trip-wired in `test/client/reconnect.test.ts` (3 tests,
+green, deliberately asserting the defect). G2-6d does NOT close; superseded by the B3 open gate in
+Current State.
+
+**Test counts:** 130/130 total (109 pre-G2 + 5 B2 + 13 B1 + 3 B3). `tsc --noEmit` clean.
+HEAD: see `git log --oneline -3`.
