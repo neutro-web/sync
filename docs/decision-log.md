@@ -781,3 +781,26 @@ contract. This closes the Phase 1b `_seenIds` unbounded-growth debt.
 **Seam impact:** None. No change to T1–T5 or `src/core/types.ts`.
 **Gate impact:** D3/D4 assert engine-local reload recovery against the durable-accept cursor
 timing. D5 asserts no double-apply against the cursor-gated seenIds strategy.
+
+---
+
+## 2026-06-30 — D7: Persistence baseline numbers (Phase 3)
+
+**Benchmark suite created:** `bench/persistence.bench.ts` — vitest bench mode with three
+measurements for browser-based persistence:
+
+1. **Durable write latency** — per-call cost of `engine.apply()` with fire-and-forget IDB
+   write queued (not awaited). Single write, baseline latency.
+2. **Replay throughput** — time for `engine.hydrateScope()` to restore 1000 change records from
+   storage; denominator = 1000.
+3. **Reload-to-ready** — wall time from `new IndexedDBStore(name)` construction through
+   `hydrateScope()` resolution for 1000 records; simulates a full process reload.
+
+**Numbers to be recorded after CC/CI run:** `[numbers to be recorded after CC/CI run]`
+
+**Measurement semantics:** "Ready" = hydrateScope() has resolved and getCursor() returns the
+correct seq. Timed regions and what is counted are documented inline in the bench file.
+
+**Config changes:** Added `"bench": "vitest bench --config vitest.browser.config.ts"` to
+`package.json` scripts; added `benchmark: { include: ["bench/**/*.bench.ts"] }` to browser test
+config in `vitest.browser.config.ts`.
