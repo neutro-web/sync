@@ -13,25 +13,20 @@ the source, the source wins and this file is stale → fix it.
 **Maintenance.** Update in the same pass that lands code, as a ready-to-commit edit (same
 discipline as log entries). Keep it to roughly this length; detail belongs in the code.
 
-Last verified against source: **2026-06-30 (Phase 3 + G2 + Phase B B1/B2 complete; B3 finding open).** Seam Contract **v1.1**.
+Last verified against source: **2026-06-30 (Phase 3 Persistence D0–D7 complete; Phase B B1/B2 complete; B3 finding open).** Seam Contract **v1.1**.
 
 ---
 
-## Status: PHASE 3 + G2 PUBLIC API COMPLETE — `createSync` client, `ScopeHandle`, token-leak gate automated
+## Status: PHASE 3 PERSISTENCE COMPLETE — `PersistenceStore` interface, `IndexedDBStore`, replay-after-reload, baseline numbers
 
-Phase 3 landed `VectorClockStrategy.mergeVersions` + engine `merged` resolution arm (C1–C7 gate). G2
-landed the full consumer-facing public API: `createSync(config)` factory returning a `SyncClient`;
-`client.scope(key, cfg)` returning a `ScopeHandle` (`set`/`do`/`subscribe`/`snapshot`/`onConflict`/
-`close`). Per-scope config via client-side multiplexing (one `Engine` per scope-config, B1 — no engine
-change). Transport bridged in the client; T3 reconnect fork client-driven. Token-leak gate automated
-and mutation-verified (`test/types/no-token-leak.test.ts`). **109/109 tests passing**; `tsc --noEmit`
-clean; lint clean. HEAD `d21f26d`. Core engine/types/resolver-pump bytewise unchanged across G2 branch.
-
-Phase B landed `CRDTPositionStrategy` (B1, closes the charter Phase 2 letter gap) and
-generalized op-with-version conflict routing through Model C (B2, `opUnitChanges:
-Map<string, VersionedChange>` replaces `opUnitVersions: Map<string, Version>`). B3
-surfaced — but did not close — a confirmed defect in the client's durable
-reconnect-replay branch (see "Known gaps" below). **130/130 tests passing.**
+Phase 3 Persistence (D0–D7) is complete. **D0** resolved cursor-advancement semantics (durable-accept, cursor-gated
+seenIds). **D1–D5** built the pluggable persistence substrate: `PersistenceStore` interface + `MemoryStore` (D1),
+real `IndexedDBStore` with dual schema (changes + cursors, D2–D5), and replay-after-reload with durable
+cursor recovery + op-dedup across restart. **D6** chunked `changes()` replay. **D7** captured baseline
+numbers (durable write latency, replay throughput, reload-to-ready). Phase B landed `CRDTPositionStrategy`
+(B1) and op-concurrent routing through Model C (B2); B3 surfaced a confirmed defect in the durable reconnect
+branch (see "Known gaps" below). **142/142 tests passing**; `tsc --noEmit` clean; lint clean. HEAD `3bcf36c`.
+Seam Contract **v1.1** frozen (no T1–T5 change).
 
 ---
 
@@ -58,17 +53,23 @@ not built · **—** = not created.
 |---|---|---|
 | `package.json` | REAL | `@neutro/sync`, `"type": "module"`. devDeps: typescript ^5.5, vitest ^4.1.9, biome ^1.9. Scripts: `typecheck`, `test`, `test:watch`, `lint`. No production deps (standalone). |
 | `tsconfig.json` | REAL | `strict: true`, `moduleResolution: "bundler"`, `allowImportingTsExtensions: true`, `noEmit: true`. Includes `src`, `test`, `vitest.config.ts`. |
-| `vitest.config.ts` | REAL | Includes `test/**/*.test.ts`. |
+| `vitest.config.ts` | REAL | Node workspace + `vitest.browser.config.ts` for browser workspace. `pnpm test` runs node; `pnpm test:browser` runs browser (IndexedDBStore + real reload tests). |
 | `.gitignore` | REAL | Covers: `node_modules/`, `dist/`, `*.tsbuildinfo`, `coverage/`, logs, OS files, editors, `.env*`, `*.tmp`. |
 
 ### `src/core/` → `@neutro/sync/core` (the engine)
 | File | Status | Notes |
 |---|---|---|
 | `src/core/types.ts` | REAL | Full TypeScript expression of seam contract v1.0. All eight seam types: `Change`/`StateChange`/`OpChange`/`VersionedChange`, `Cursor`/`Version`/`ClockStrategy`, `Lifetime`, `ChangeBatch`/`Snapshot`/`Feed`, `Conflict`/`Resolution`/`Resolver`, `Scope`/`Subscription`/`ScopeRouter`, `Transport`, opaque tokens. Factory helpers: `makeChangeId`, `makeScope`, `makeConflictUnit`, `makeCursor`, `DURABLE`, `ephemeral`. |
-| `src/core/engine.ts` | REAL | `Engine implements Feed, ScopeRouter`. In-memory. T1 kind branching; T2 version opacity (only `compare()` called); T3 lifetime fork (ephemeral off durable path); T4 `concurrent` path activated for BOTH state and op (Model C, Phase B / B2); T5 per-scope causal order via synchronous subscription dispatch. `getCursor(scope)` for test assertions. `resolveConflict(scope, unit, resolution)` for manual/automatic resolution, generalized by `change.kind` (state winners land in the state-unit maps, op winners in `opUnitChanges` only). |
+| `src/core/persistence.ts` | REAL | `PersistenceStore` interface + `MemoryStore` implementation. Slot discipline: no engine internals in the contract; `write(batch)` + `read(scope, cursor)` seam for fire-and-forget writes only. Opaque change records; no domain types. |
+| `src/core/engine.ts` | REAL | `Engine implements Feed, ScopeRouter`. In-memory core (durable log + cursor kept optionally backed by `PersistenceStore`). T1 kind branching; T2 version opacity (only `compare()` called); T3 lifetime fork (ephemeral off durable path); T4 `concurrent` path activated for BOTH state and op (Model C, Phase B / B2); T5 per-scope causal order via synchronous subscription dispatch. Constructor opts: `{resolver?, store?, chunkSize?}`. `hydrateScope(scope): Promise<void>` loads durable state from store. `getCursor(scope)` for test assertions. `changes(scope, since?, chunkSize?)` yields bounded chunks. `resolveConflict(scope, unit, resolution)` for manual/automatic resolution, generalized by `change.kind` (state winners land in the state-unit maps, op winners in `opUnitChanges` only). |
 | conflict detection (`concurrent` path) | REAL | Model C detect-and-hold, live on BOTH the state path (`_applyState`) and the op path (`_applyOp`, Phase B / B2). `ScopeState.openConflicts` holds both competing `VersionedChange`s per unit (state or op — never mixed within one entry). `concurrent` arm fires `onConflict` as notification, returns synchronously. `resolveConflict(scope, unit, resolution)` lands resolution via `_landChange`, generalized by `change.kind`: a state winner lands in `durableStateUnits`/`ephemeralStateUnits`; an op winner lands in `opUnitChanges` only, never the state maps. `take-local`/`take-remote`/`merged` all supported on both paths; `defer` leaves conflict open. **Convergence expectation documented in seam-contract.md §5: local resolver MUST be a deterministic pure function.** |
 | scope routing (`ScopeRouter`) | REAL | `Engine.subscribe(scope, { onBatch, onConflict })` → `Subscription`. Per-scope; fires synchronously on accepted changes. |
 | `src/core/resolver-pump.ts` | REAL | `ResolverPump`. Subscribes to `onConflict`; calls `resolver.resolve(conflict)`; calls `resolveConflict` with the result. Async resolvers: returns `defer` synchronously while the promise settles. Absent ⇒ conflicts stay open for manual resolution. Closes Phase 1b Finding #3 (Resolver/onConflict were dead under all paths). |
+
+### `src/persistence/` → `@neutro/sync/persistence`
+| File | Status | Notes |
+|---|---|---|
+| `src/persistence/idb-store.ts` | REAL | `IndexedDBStore implements PersistenceStore`. IndexedDB schema: `'changes'` (keyPath `[scopeKey, seq]`) stores durable changes; `'cursors'` (keyPath `scopeKey`) stores per-scope cursor records (`{scopeKey, seq}`). Dual schema for efficient per-scope replay and cursor positioning. Fire-and-forget writes only (no await). |
 
 ### `src/strategies/` → `@neutro/sync/strategies`
 | File | Status | Notes |
@@ -88,7 +89,7 @@ not built · **—** = not created.
 ### `src/client/` → public API layer
 | File | Status | Notes |
 |---|---|---|
-| `src/client/create-sync.ts` | REAL | `createSync(config: SyncConfig): SyncClient`. Client-side multiplexer: `Map<string, ScopeEntry>` — one `Engine` per scope-config (B1). Wires `transport.receive → engine.apply` (demux by `batch.scope.key`) and `onBatch → transport.send` (relay). T3 reconnect fork: ephemeral scopes → `engine.snapshot()` resend; durable scopes → `engine.changes(scope, lastCursor)` incremental replay. `replayVersion` counter cancels superseded replay loops. `ScopeHandle`: `set`/`do` (verb-per-kind, mint version internally), `subscribe` (cursor stripped → `readonly Change[]`), `snapshot` (`Promise<readonly Change[]>`), `onConflict` (manual mode only), `close` (idempotent, sets `handleClosed`). `closedKeys` tombstone prevents silent re-registration. `client.close()` propagates via `handle.close()` on all held references. **Known defect (Phase B / B3, NOT fixed here):** the `transport.onConnect()` durable replay branch (`engine.changes(scope, lastCursor)`) is structurally inert — see "Known gaps" below. |
+| `src/client/create-sync.ts` | REAL | `createSync(config: SyncConfig): SyncClient`. `SyncConfig` now includes `store?: PersistenceStore` and `chunkSize?: number` for replay batching. Client-side multiplexer: `Map<string, ScopeEntry>` — one `Engine` per scope-config (B1). Wires `transport.receive → engine.apply` (demux by `batch.scope.key`) and `onBatch → transport.send` (relay). Hydration on scope registration: calls `engine.hydrateScope(scope)` if store present. T3 reconnect fork: ephemeral scopes → `engine.snapshot()` resend; durable scopes → `engine.changes(scope, lastCursor)` incremental replay. `replayVersion` counter cancels superseded replay loops. `ScopeHandle`: `set`/`do` (verb-per-kind, mint version internally), `subscribe` (cursor stripped → `readonly Change[]`), `snapshot` (`Promise<readonly Change[]>`), `onConflict` (manual mode only), `close` (idempotent, sets `handleClosed`). `closedKeys` tombstone prevents silent re-registration. `client.close()` propagates via `handle.close()` on all held references. **Known defect (Phase B / B3, NOT fixed here):** the `transport.onConnect()` durable replay branch (`engine.changes(scope, lastCursor)`) is structurally inert — see "Known gaps" below. |
 | `src/index.ts` | REAL | Public barrel. Runtime exports: `createSync`, `lww`, `vectorClock`. Type-only exports: `ScopeConfig`, `ScopeHandle`, `SyncClient`, `SyncConfig`, `WriteOpts`, `Change`, `Conflict`, `Lifetime`, `Resolution`, `Subscription`, `Transport`. No `Cursor`, `Version`, `Engine`, `ResolverPump`, or construction helpers. |
 
 ### `src/adapters/` → `@neutro/sync/adapters/<framework>` (subpath exports)
@@ -105,10 +106,17 @@ not built · **—** = not created.
 | `test/harness/convergence-harness.ts` | REAL | `ConvergenceHarness(opts)`. N replicas, N×(N-1) directed channels. `applyLocal`, `drainToQuiescence` (round-based), `assertConverged` (throws on <2 replicas), `throwIfDrainErrors`, partition/reconnect controls. |
 | `test/harness/harness.test.ts` | REAL | 10 tests, all passing (G1–G6). Untouched by Phase 1b. |
 
+### `test/persistence/`
+| File | Status | Notes |
+|---|---|---|
+| `test/persistence/memory-store.test.ts` | REAL | MemoryStore contract compliance tests: basic write/read, per-scope isolation, cursor positioning. |
+| `test/persistence/idb-store.test.ts` | REAL | IndexedDBStore functional + durability tests: real IndexedDB write/read, schema validation, per-scope change storage, cursor record isolation. (Node via fake-indexeddb). |
+
 ### `test/engine/`
 | File | Status | Notes |
 |---|---|---|
 | `test/engine/engine.test.ts` | REAL | 24 tests covering P1–P12 (harness + Phase 1b engine). Harness tests (P1–P7, 10 tests) verify convergence harness machinery and engine gate coverage. Engine tests (P8–P12, 14 tests) cover gossip wired via `Engine.subscribe()` + `ChannelSimulator`. P8: reconnect replay via `changes(since)`; P9: 3-replica contention under partition; P10: LWW cross-instance tiebreaking; P11: ephemeral preserves durable base; P12: per-scope seenIds. |
+| `test/engine/engine-chunking.test.ts` | REAL | D6 gate tests: `changes()` chunking with bounded `chunkSize`, per-scope causal order preserved across chunk boundaries, large log stress test. |
 | `test/engine/phase2-conflict.test.ts` | REAL | 12 tests covering Q1–Q7 (Phase 2 gate). Q1: vector clock concurrent detection (4 tests). Q2: Model C detect-and-hold (2). Q3: ResolverPump resolver invocation. Q4: 2-replica convergence under fault injection with deterministic resolver (2). Q5: defer holds + subsequent resolution + no-op on non-conflicting unit (2). Q6: last-confirmed-winner reads during open conflict. |
 | `test/engine/phaseB-op-conflict.test.ts` | REAL | 5 tests covering B2-2..B2-5 (B2-1 is a typecheck/grep check, no runtime test). Op-with-version concurrent detect-and-hold, resolveConflict landing on the op path (durable + ephemeral), 2-replica convergence under fault injection via a deterministic pick-by-id resolver, pure-intent-op regression. |
 | `test/strategies/crdt-position.test.ts` | REAL | 13 tests covering B1-2..B1-5 (B1-1 is a typecheck/grep check). `compare` total-order + concurrent-on-equal-position semantics; `mergeVersions` dominance + replica-identical (verified via two DIFFERENT strategy instances, not the same one twice); 2-replica state convergence (B1-4) and op convergence (B1-5, depends on B2) under fault injection via a `merged` resolver. |
@@ -120,6 +128,17 @@ not built · **—** = not created.
 | `test/client/reconnect.test.ts` | REAL | 3 tests. **Not a gate closure** — a deliberate characterization of the confirmed B3 defect (durable reconnect-replay is structurally inert), kept green as a regression trip-wire. See decision-log Phase B / B3 entry and "Known gaps" below. |
 | `test/types/public-surface.test.ts` | REAL | 14 type-level tests: `ScopeHandle` method signatures, `SyncClient`/`SyncConfig`/`createSync`/`WriteOpts` type surface, barrel re-exports for all six primitive types + four client types (`toEqualTypeOf` from barrel). |
 | `test/types/no-token-leak.test.ts` | REAL | **G2-1 gate (automated, mutation-verified).** G2-1a: `@ts-expect-error` assertions on 11 forbidden tokens (`Cursor`, `Version`, `Engine`, `ResolverPump`, `makeChangeId`, `makeConflictUnit`, `makeCursor`, `makeScope`, `resolveConflict`, `getCursor`, `DURABLE`) — `pnpm typecheck` fails if any is added to barrel. G2-1b: `Object.keys(barrel)` equality against exact allow-list `{createSync, lww, vectorClock}` — any new runtime export fails. G2-1c: positive assertion that `Change.version` exists (accepted residual, per decision-log 2026-06-29 — guards against over-tightening). |
+
+### `test/browser/`
+| File | Status | Notes |
+|---|---|---|
+| `vitest.browser.config.ts` | REAL | Browser test runner config (via `@vitest/browser`). Runs in real browser or headless; targets IndexedDB persistence tests. |
+| `test/browser/smoke.test.ts` | REAL | D3–D5 gate tests: real page reload (or worker restart), IndexedDBStore hydration, persisted cursor recovery, op-dedup across restart. |
+
+### `bench/`
+| File | Status | Notes |
+|---|---|---|
+| `bench/persistence.bench.ts` | REAL | D7 baseline measurements: durable write latency (per-call cost, fire-and-forget), replay throughput (changes/sec from 1000 records), reload-to-ready time. Browser-based; runs via `pnpm bench`. Measurement semantics documented inline. |
 
 ### `integration/`
 | File | Status | Notes |
@@ -186,14 +205,21 @@ engine tests after `drainToQuiescence()`.
 
 ## Known gaps / defects
 
-### Finding — `seenIds` sets grow unbounded [MED — Phase 3]
-Per-scope `Set<string>`, no eviction or TTL. Correct for the in-memory Phase 2 sandbox.
-A real persistence layer (Phase 3) needs a compaction or sliding-window eviction strategy.
+### RESOLVED — `seenIds` eviction strategy [Phase 3 / D0–D5, 2026-06-30]
+Per-scope `Set<string>` now uses cursor-gated compaction: changes with `seq ≤ persisted
+cursorSeq` are implicitly seen on reload (already in persisted log); only in-flight window
+above cursor is held in memory. Pure-intent ops (no `seq`) are in-memory only, cleared on
+restart. See decision-log Phase 3 / D0 entry and `docs/design/cursor-advancement.md`.
 
 ### RESOLVED — `_applyOp` concurrent arm [Phase B / B2, 2026-06-30]
 `opUnitVersions: Map<string, Version>` is now `opUnitChanges: Map<string, VersionedChange>`;
 the concurrent arm routes through Model C exactly like the state path. See decision-log
 Phase B / B2 entry.
+
+### RESOLVED — `changes()` single-batch chunking [Phase 3 / D6, 2026-06-30]
+`changes(scope, since?, chunkSize?)` now yields durable log in bounded chunks (configurable
+per engine, default size). Per-scope causal order preserved across chunk boundaries. Tested
+in `test/engine/engine-chunking.test.ts`. See decision-log Phase 3 / D6 entry.
 
 ### Finding — durable reconnect-replay branch is structurally inert [Phase B / B3, HIGH, 2026-06-30]
 `create-sync.ts`'s `transport.onConnect()` durable-replay branch
@@ -205,18 +231,23 @@ Separately, the mechanism only republishes THIS engine's own log (broadcast), ne
 a peer's — so it cannot recover a peer's missed writes regardless of `lastCursor` timing.
 Fix requires deciding when `lastCursor` advances (confirmed-delivery, not durable-accept)
 and/or a pull-based catch-up seam — both are §7 delivery-above-transport territory
-(Phase 5). NOT fixed in Phase B; see decision-log Phase B / B3 entry.
+(Phase 5). NOT fixed in Phase 3; see decision-log Phase B / B3 entry.
+
+### OPEN (Phase 5) — Peer-recovery / pull-based catch-up seam
+The durable-reconnect finding's second half (the mechanism only self-publishes, never pulls
+a peer's missed writes) is explicitly deferred to Phase 5 as a delivery-above-transport
+concern (§7). Engine-local replay-after-reload (D3–D5) is now closed.
+
+### OPEN (Phase 5) — `transport.send` retry/backpressure/ack
+Fire-and-forget `send()` semantics remain (§7). Delivery guarantees and retry logic built
+on cursor/replay will be Phase 5 work. Documented at retry sites in the code.
 
 ### Deferred (reason recorded)
-- **seenIds eviction** → Phase 3 (persistence).
-- **`changes()` single-batch / no chunking** → Phase 3 (production log ergonomics).
 - **`onBatch` subscriber error isolation** → FIXED (G2 — per-callback try/catch in fan-out loop).
-- **`_applyOp` concurrent arm** → RESOLVED (Phase B / B2 — `opUnitChanges: Map<string, VersionedChange>` + Model C on op path).
-- **`InProcessTransport` / T3 client durable-fork** → G2-6d-bis (confirmed defect, not a simple "untested" gap; see Known gaps above and decision-log Phase B / B3).
-- **`lastCursor` persistence** → Phase 3 (in-memory; process restart replays from log start).
-- **`lastCursor` advancement semantics / pull-based catch-up seam** → Phase 5 (required to fix G2-6d-bis; delivery-above-transport territory).
-- **`transport.send` retry/backpressure/ack** → Phase 5 (`.catch()` sites are the seam; documented).
 - **`closedKeys` growth bound** → Phase 5 (grows with scope churn; acceptable at current cardinality).
+- **Peer-recovery / pull-based catch-up seam** → Phase 5 (delivery-above-transport territory; B3 finding second half).
+- **`lastCursor` advancement semantics (confirmed-delivery vs durable-accept)** → Phase 5 (decision-log D0 chose durable-accept for engine-local recovery; peer-recovery is Phase 5).
+- **`transport.send` retry/backpressure/ack** → Phase 5 (§7 delivery-above-transport; `.catch()` sites are the seam; documented).
 
 ---
 
@@ -225,6 +256,7 @@ and/or a pull-based catch-up seam — both are §7 delivery-above-transport terr
 - **Standalone (locked)** — no `neutro/*` runtime dependency ever enters `src/core`. A reactive
   consumer binds to `ns` on its own side; there is no `ns`-side adapter package in core scope.
 - **G2 Public API** — CLOSED 2026-06-29. Implementation complete, automated, mutation-verified.
+- **Phase 3 Persistence (D0–D7)** — CLOSED 2026-06-30. Pluggable persistence + IndexedDB + replay-after-reload + baseline numbers. **142 tests passing**.
 - **G2-6d-bis** — client T3 durable-fork (`onConnect` path) is tested and confirmed
   structurally inert (see "Known gaps"). Fix is Phase 5 (delivery-above-transport) territory.
 - **G3 LCD-risk** — the conformance suite is the eventual evidence; not blocking current phases.

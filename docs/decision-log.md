@@ -25,7 +25,7 @@
 
 ## Current State
 
-_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 complete; G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (not closed). D0 cursor-advancement design decision logged — Phase 3 persistence gate unblocked for D3/D4/D5.
+_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 persistence complete (D0–D7). G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (not closed). D0 cursor-advancement decision logged and implemented; full persistence gate closure follows.
 
 ### Status at a glance
 - **Seam contract:** v1.1. T1–T5 ratified; eight seam types defined; §9 consumer map
@@ -33,12 +33,12 @@ _Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional meth
   optional method (2026-06-29). Founding semantics otherwise unchanged.
 - **Governance scaffold:** Complete. Charter, custom instructions, AGENTS.md, decision log,
   implementation-state all in place.
-- **Code:** Phase 3 + G2 Public API complete. Phase B: B2 (`_applyOp` concurrent routing
-  via Model C, op storage carries full `VersionedChange`) and B1 (`CRDTPositionStrategy`
-  — closes the charter Phase 2 "three strategies" letter gap) landed and locked. B3
-  surfaced a confirmed defect in the client's durable reconnect-replay branch (see Log,
-  2026-06-30) — NOT closed. **130 tests passing** (109 pre-existing + 5 B2 + 13 B1 + 3
-  B3-finding); `tsc --noEmit` clean; lint clean. HEAD `5f6be03`.
+- **Code:** Phase 3 persistence (D0–D7) complete. G2 Public API complete (2026-06-29).
+  Phase B: B2 (`_applyOp` concurrent routing via Model C, op storage carries full
+  `VersionedChange`) and B1 (`CRDTPositionStrategy` — closes the charter Phase 2 "three
+  strategies" letter gap) landed and locked. B3 surfaced a confirmed defect in the client's
+  durable reconnect-replay branch (see Log, 2026-06-30) — NOT closed. **142 tests passing**
+  (130 pre-existing + 12 D0–D7); `tsc --noEmit` clean; lint clean. HEAD `3bcf36c`.
 
 ### Locked (do not drift without an explicit superseding entry)
 - **Standalone** — `ns` has no dependency on any neutro sibling. No `neutro/*` runtime import
