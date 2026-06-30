@@ -22,13 +22,12 @@ import {
   type ChangeBatch,
 } from "../../src/core/types.ts";
 
-const DB = "ns-test-reload";
 const scope = makeScope("s-reload");
 // Fresh LWWClockStrategy on each "reload" — new JS heap means new instance.
 function makeClock() { return new LWWClockStrategy(0); }
 
-async function seedEngine(n: number): Promise<void> {
-  const store = new IndexedDBStore(DB);
+async function seedEngine(dbName: string, n: number): Promise<void> {
+  const store = new IndexedDBStore(dbName);
   const clock = makeClock();
   const engine = new Engine(clock, { store });
   await engine.hydrateScope(scope);
@@ -49,20 +48,21 @@ async function seedEngine(n: number): Promise<void> {
   await new Promise((r) => setTimeout(r, 50)); // flush IDB writes
 }
 
-async function freshEngine(): Promise<Engine> {
+async function freshEngine(dbName: string): Promise<Engine> {
   // Simulates "new JS heap": brand-new store + engine instances.
-  const store = new IndexedDBStore(DB);
+  const store = new IndexedDBStore(dbName);
   const engine = new Engine(makeClock(), { store });
   await engine.hydrateScope(scope); // hydrate from IndexedDB — the whole point
   return engine;
 }
 
 describe("D3 — Replay after reload", () => {
+  const DB = "ns-test-d3";
   beforeEach(async () => { await new IndexedDBStore(DB).clear(); });
 
   it("D3 — snapshot matches pre-reload state after hydration (3 durable units)", async () => {
-    await seedEngine(3);
-    const engine = await freshEngine();
+    await seedEngine(DB, 3);
+    const engine = await freshEngine(DB);
     const snap = await engine.snapshot(scope);
     expect(snap.changes).toHaveLength(3);
     const values = snap.changes.map((c) => (c as any).value).sort();
@@ -70,16 +70,16 @@ describe("D3 — Replay after reload", () => {
   });
 
   it("D3 — changes(scope, null) yields all 3 durable changes after reload", async () => {
-    await seedEngine(3);
-    const engine = await freshEngine();
+    await seedEngine(DB, 3);
+    const engine = await freshEngine(DB);
     const all: ChangeBatch[] = [];
     for await (const b of engine.changes(scope, null)) all.push(b);
     expect(all.flatMap((b) => b.changes)).toHaveLength(3);
   });
 
   it("D3 — changes(scope, terminalCursor) yields nothing (tail empty)", async () => {
-    await seedEngine(3);
-    const engine = await freshEngine();
+    await seedEngine(DB, 3);
+    const engine = await freshEngine(DB);
     const cursor = engine.getCursor(scope);
     const tail: ChangeBatch[] = [];
     for await (const b of engine.changes(scope, cursor)) tail.push(b);
@@ -117,7 +117,7 @@ describe("D3 — Replay after reload", () => {
       }],
     });
     await new Promise((r) => setTimeout(r, 50));
-    const reloaded = await freshEngine();
+    const reloaded = await freshEngine(DB);
     const snap = await reloaded.snapshot(scope);
     // Only the durable change survives
     expect(snap.changes).toHaveLength(1);
@@ -126,23 +126,25 @@ describe("D3 — Replay after reload", () => {
 });
 
 describe("D4 — Persisted cursor", () => {
+  const DB = "ns-test-d4";
   beforeEach(async () => { await new IndexedDBStore(DB).clear(); });
 
   it("D4 — cursor record exists in IndexedDB store after seeding", async () => {
-    await seedEngine(3);
+    await seedEngine(DB, 3);
     // Verify directly via store — cursor must be stored, not derived
     const storedSeq = await new IndexedDBStore(DB).readCursor(scope.key);
     expect(storedSeq).toBe(3);
   });
 
   it("D4 — fresh engine getCursor returns stored seq (not 0 or re-derived from log)", async () => {
-    await seedEngine(3);
-    const engine = await freshEngine();
+    await seedEngine(DB, 3);
+    const engine = await freshEngine(DB);
     expect(engine.getCursor(scope)._seq).toBe(3);
   });
 });
 
 describe("D5 — seenIds across restart", () => {
+  const DB = "ns-test-d5";
   beforeEach(async () => { await new IndexedDBStore(DB).clear(); });
 
   it("D5 — durable op redelivered after reload is not double-applied", async () => {
@@ -166,7 +168,7 @@ describe("D5 — seenIds across restart", () => {
     await new Promise((r) => setTimeout(r, 50));
 
     // Post-reload: fresh engine, redeliver the same op
-    const e2 = await freshEngine();
+    const e2 = await freshEngine(DB);
     await e2.apply(opBatch); // re-delivery — must be no-op
 
     // Durable log must contain exactly 1 op entry
