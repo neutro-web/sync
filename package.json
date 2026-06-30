@@ -6,11 +6,15 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:browser": "vitest run --config vitest.browser.config.ts",
     "test:watch": "vitest",
     "lint": "biome check src test"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
+    "@vitest/browser": "^4.1.9",
+    "@vitest/browser-playwright": "^4.1.9",
+    "playwright": "^1.44.0",
     "typescript": "^5.5.0",
     "vitest": "^4.1.9"
   }
