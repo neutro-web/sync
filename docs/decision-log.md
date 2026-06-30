@@ -25,7 +25,7 @@
 
 ## Current State
 
-_Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 complete; G2 Public API surface resolved and locked.
+_Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 complete; G2 Public API surface resolved, implemented, automated, and locked.
 
 ### Status at a glance
 - **Seam contract:** v1.1. T1–T5 ratified; eight seam types defined; §9 consumer map
@@ -33,7 +33,11 @@ _Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional meth
   optional method (2026-06-29). Founding semantics otherwise unchanged.
 - **Governance scaffold:** Complete. Charter, custom instructions, AGENTS.md, decision log,
   implementation-state all in place.
-- **Code:** Phase 3 complete. `VectorClockStrategy.mergeVersions` + engine `merged` arm implemented and gate-verified (C1–C7). 55 tests passing. `tsc --noEmit` clean. Public API shape locked (G2 resolved); implementation brief handed to runtime.
+- **Code:** Phase 3 + G2 Public API complete. `createSync` client + `ScopeHandle` (`set`/`do`/
+  `subscribe`/`snapshot`/`onConflict`/`close`), per-scope config via client multiplexing (B1),
+  auto-resolution default, full T3 reconnect fork in the client. Pure-additive — core engine/types
+  bytewise unchanged. Token-leak gate automated + mutation-verified. **109 tests passing**;
+  `tsc --noEmit` clean. HEAD `d21f26d`.
 
 ### Locked (do not drift without an explicit superseding entry)
 - **Standalone** — `ns` has no dependency on any neutro sibling. No `neutro/*` runtime import
@@ -72,21 +76,24 @@ _Last updated: 2026-06-29. Seam Contract **v1.1** (`mergeVersions` optional meth
   Engine guard: `merged` arm throws a precise error if `mergeVersions` absent. Propagated
   resolution deferred. **Implementation complete (Phase 3).** C1–C7 gate verified; 55 tests passing. See 2026-06-29 Phase 3 entry.
 - **Public API shape [LOCKED — G2]** — `createSync(config)` → client; `client.scope(key, cfg)` →
-  handle; `handle.set/do/subscribe/snapshot/onConflict(manual)/close`; per-scope config via client
-  multiplexing one Engine per scope-config; transport bridged in the client; no
-  `Version`/`Cursor`/`Change`-construction in any consumer signature. Additive over seam v1.1.
-  See 2026-06-29 G2 entry.
+  handle; `set`/`do`/`subscribe`/`snapshot`/`onConflict(manual)`/`close`. Per-scope config via client
+  multiplexing one `Engine` per scope-config (no engine change). Transport bridged in the client; T3
+  reconnect fork client-driven. No `Version`/`Cursor`/`Change`-construction in any consumer signature
+  (automated: `test/types/no-token-leak.test.ts`, mutation-verified). Additive over seam v1.1. See
+  2026-06-29 G2 close-out entry.
 
 ### Open gates (surfaced, NOT decided — do not build past)
 - **G3 — LCD-risk proof**: demonstrate the universal seam isn't worse than a purpose-built
   engine per consumer. Addressed by the conformance suite; not blocking early phases.
+- **G2-6d — client T3 durable-fork test** (sandbox; deterministic): the durable replay branch in
+  `create-sync.ts` has no test firing `transport.onConnect()`. Not blocking; schedule in the next
+  runtime/integration pass.
 
 ### Superseded / resolved
 - **G1 — Substrate** — RESOLVED 2026-06-24: `ns` is standalone (option a).
-- **G2 — Public API surface** — RESOLVED 2026-06-29: `createSync` factory + per-scope chainable
-  handles; per-scope config via client multiplexing (no engine change); `set`/`do` write surface;
-  auto-resolution default. Pure-additive over seam v1.1. See 2026-06-29 G2 entry +
-  `docs/design/public-api.md`. Blocks Phase 4 *implementation*, not design.
+- **G2 — Public API surface** — RESOLVED 2026-06-29: designed + implemented + automated, pure-additive
+  over seam v1.1, mutation-verified leak gate. Clean on every path G2 owns; the `_applyOp` concurrent
+  gap is pre-existing (Phase 3 sub-gate), not a G2 caveat. See 2026-06-29 G2 close-out entry.
 
 ---
 
@@ -546,3 +553,70 @@ The write/emit ergonomics left open there are resolved by item 3.
 **Out of scope (unchanged):** `_applyOp` concurrent routing (Phase 3 runtime sub-gate); async
 local write + backpressure (Phase 5); framework adapters (Phase 4 implementation, downstream of
 this frozen plain-TS surface); first-consumer integration (CC/build task downstream of this gate).
+
+---
+
+### 2026-06-29 — G2 Public API surface RESOLVED-clean; implemented + automated [LOCKED — G2 closed]
+
+**Gate:** G2 (Public API surface), open since 2026-06-24. Designed, implemented, reviewed (3 rounds +
+axiom audit), and automated. **Fully additive over seam v1.1** — verified bytewise: `src/core/engine.ts`,
+`src/core/types.ts`, `src/core/resolver-pump.ts` unchanged across the entire branch (`237421c..d21f26d`).
+No seam change, no T1–T5 change, no runtime sub-gate spawned.
+
+Design doc: `docs/design/public-api.md`. Implementation: `src/client/create-sync.ts` +
+`src/strategies/index.ts` factories + `src/index.ts` barrel. Close-out automation:
+`test/types/no-token-leak.test.ts`.
+
+**Independent verification (clone + run + mutation, not report-trusted):**
+- HEAD `d21f26d`. `tsc --noEmit` clean; **109/109 tests** green; lint clean.
+- Additivity: `git diff 237421c..d21f26d` over the three core files is empty.
+- Leak-gate has teeth (mutation-tested): injecting a forbidden named export (`makeCursor`) flips the
+  `@ts-expect-error` guard to TS2578 and breaks `typecheck`; injecting a runtime value export
+  (`makeScope`) fails the `Object.keys(barrel)` allow-list. Both anti-rot layers bite.
+
+**Shipped surface (frozen).** `createSync(config)` → `SyncClient`; `client.scope(key, cfg)` →
+`ScopeHandle` with `set`/`do` (verb-per-kind write), `subscribe` (delivers `readonly Change[]`, cursor
+stripped), `snapshot` (`Promise<readonly Change[]>`), `onConflict` (manual mode only), `close`
+(idempotent). Strategy factories `lww(nodeId?)` / `vectorClock(nodeId)` return the `ClockStrategy`
+interface (no concrete class leak). Per-scope config via **client multiplexing — one `Engine` per
+scope-config (B1)** — chosen because the engine's single-clock limit aligns with T5 (no cross-scope
+coordination is promised), so per-scope engine isolation costs nothing over one-engine-with-N-scopes
+while keeping `_applyState` free of a scope→clock hot-path lookup. Auto-resolution is the default when
+a resolver is configured (a configured-but-unrun resolver would be silent divergence per §5); `manual:
+true` opts into hold-open.
+
+**Implementation decisions worth recording (from the 3 review rounds):**
+- **`prevVersions` updated synchronously** before `engine.apply` (B-10): minting the next local write
+  from a stale `prev` produced spurious concurrent-conflict churn. The `onBatch` "only advance" guard
+  handles remote-win advancement so a remote winner correctly moves `prev` forward.
+- **Reconnect replay race guarded** (C1): a `replayVersion` counter per scope-entry; a replay loop
+  aborts if a newer reconnect superseded it.
+- **Lifecycle fully guarded** (A-1/A-6/A-9/B-5/B-8): post-`close` writes, `scope(closedKey)`, the
+  manual `resolve()` closure, and in-flight replay all throw or short-circuit after close.
+- **Relay is O(P²) by design** for a P-peer mesh; dedup via engine `seenIds` prevents loops. A future
+  server-relay transport filters by origin. Documented at the relay site.
+
+**Accepted residual (logged, do not "fix").** A `StateChange` in the `subscribe` stream carries its
+`.version`. `Version` is branded-opaque (T2) and inert to the consumer; stripping it would force a
+per-fire clone (allocation in the read hot path). Zero-copy-over-perfect-hiding, deliberate. `Cursor`
+is the asymmetric case — it has a readable `_seq`, so it must never reach a consumer; the leak gate
+asserts `Cursor` unreachable while explicitly NOT failing on inert `Version`-in-`Change` (G2-1c guards
+against a future over-tightening pass breaking this).
+
+**G2 is clean on every path it owns.** The axiom audit listed Axiom 4 (T4) as "PARTIAL" — that refers
+to the **pre-existing `_applyOp` concurrent arm** (deferred since Phase 2), not anything G2 introduced.
+G2 builds no op-conflict because the engine surfaces none; its state-path conflict handling is fully
+T4-compliant. The op-path gap stays in its existing Phase 3 runtime sub-gate home and is **not** a G2
+caveat. Recorded here to prevent re-attribution.
+
+**Supersedes:** `2026-06-24 Public API gate opened [OPEN — G2]` — closed. The write/emit ergonomics
+left open there are resolved by the `set`/`do` surface.
+
+**Open follow-ups (deferred, not blocking G2 closure):**
+- **G2-6d — client-side T3 durable-fork has no `onConnect`-firing test.** The durable replay branch
+  in `create-sync.ts` is live code; the existing reconnect test exercises engine-level dedup via
+  `_deliver`, not the client's `transport.onConnect()` fork. Tracked as an open gate in Current State.
+- **Persistent cursor (Phase 3)** — `lastCursor` is in-memory; process restart replays from log start.
+- **Delivery above transport (Phase 5)** — `transport.send` `.catch()` sites are the
+  retry/backpressure/ack seam; identified, not built.
+- **`closedKeys` unbounded growth (Phase 5)** — acceptable at current scope cardinality.
