@@ -25,7 +25,7 @@
 
 ## Current State
 
-_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 complete; G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (not closed).
+_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 complete; G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (not closed). D0 cursor-advancement design decision logged — Phase 3 persistence gate unblocked for D3/D4/D5.
 
 ### Status at a glance
 - **Seam contract:** v1.1. T1–T5 ratified; eight seam types defined; §9 consumer map
@@ -760,3 +760,24 @@ passing closure of G2-6d.
 **Supersedes:** the framing of G2-6d in the 2026-06-29 G2 close-out entry ("the durable
 replay branch ... is live code but is not triggered by any current test") — it is now
 known to be untriggerable-to-any-effect, not merely untested.
+
+---
+
+## 2026-06-30 — D0: cursor-advancement and seenIds strategy (Phase 3 persistence gate)
+
+**Cursor persistence (a):** The persisted cursor advances at **durable-accept** — the same
+synchronous moment `cursorSeq` increments when a durable log entry is written — because this
+is sufficient for engine-local reload recovery and conflating it with confirmed-delivery would
+introduce a delivery-above-transport (§7) concern that is explicitly Phase 5.
+
+**seenIds strategy (b):** **Cursor-gated** — changes with `seq ≤ persisted cursorSeq` are
+implicitly seen on reload (covered by the persisted log); only the in-flight window above the
+cursor is held in memory. Compaction rule: on hydration, `seenIds` is initialized empty;
+anything at or below the cursor is implicitly compacted. Pure-intent op ids (no `seq`) are
+in-memory only and cleared on restart — safe because pure-intent ops are idempotent by T1
+contract. This closes the Phase 1b `_seenIds` unbounded-growth debt.
+
+**Design doc:** `docs/design/cursor-advancement.md`
+**Seam impact:** None. No change to T1–T5 or `src/core/types.ts`.
+**Gate impact:** D3/D4 assert engine-local reload recovery against the durable-accept cursor
+timing. D5 asserts no double-apply against the cursor-gated seenIds strategy.
