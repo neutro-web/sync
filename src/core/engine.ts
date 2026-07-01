@@ -202,8 +202,9 @@ export class Engine implements Feed, ScopeRouter {
 		// Self-healing: take the max of the stored cursor and the last record seq.
 		// This handles partial-write (appendChange succeeded, writeCursor crashed) without
 		// special-casing storedCursor === null — Math.max(0, lastSeq) covers both paths.
-		// biome-ignore lint/style/noNonNullAssertion: records.length > 0 guarded by ternary
-		const lastRecordSeq = records.length > 0 ? records[records.length - 1]!.seq : 0;
+		const lastRecord =
+			records.length > 0 ? records[records.length - 1] : undefined;
+		const lastRecordSeq = lastRecord?.seq ?? 0;
 		state.cursorSeq = Math.max(storedCursor ?? 0, lastRecordSeq);
 		this._scopes.set(key, state);
 	}
