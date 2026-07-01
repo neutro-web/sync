@@ -25,7 +25,7 @@
 
 ## Current State
 
-_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 persistence **D0–D7 complete**. Phase 3 Real Transports **T0–T7 CLOSED** — `BroadcastChannelTransport`, `WebSocketTransport`, wire codec, WS relay fixture, full test/bench suite, all against the frozen seam contract (regression-guard diff empty). T3-BC/T6 verify engine-local reconnect only, not peer-pull recovery. G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (peer reconnect recovery) — remains open, deferred to Phase 5, unaffected by the transports gate. D0 cursor-advancement decision logged and implemented.
+_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 persistence **D0–D7 complete**. Phase 3 Real Transports **T0–T7 CLOSED** — `BroadcastChannelTransport`, `WebSocketTransport`, wire codec, WS relay fixture, full test/bench suite, all against the frozen seam contract (regression-guard diff empty). T3-BC/T6 verify engine-local reconnect only, not peer-pull recovery. G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (peer reconnect recovery) — remains open, deferred to Phase 5, unaffected by the transports gate. D0 cursor-advancement decision logged and implemented. Phase 4 first-consumer: binding model validated against nf's seam (sandbox spike); robust end-to-end integration gated on NF-1 + the delivery-reliability layer (Finding 2 / Phase 5). B3 reconnect explicitly out of the spike scope.
 
 ### Status at a glance
 - **Seam contract:** v1.1. T1–T5 ratified; eight seam types defined; §9 consumer map
@@ -98,6 +98,11 @@ _Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional meth
 ### Open gates (surfaced, NOT decided — do not build past)
 - **G3 — LCD-risk proof**: demonstrate the universal seam isn't worse than a purpose-built
   engine per consumer. Addressed by the conformance suite; not blocking early phases.
+- **NF-1 — op idempotency key (Phase 4 API gap)**: `do()` mints op ids internally; a consumer
+  cannot make an op idempotent across redelivery, so `ns` op-dedup can't back consumer-driven
+  retry (proven: redelivered op double-applies). Resolve before a robust first-consumer
+  integration: (a) `WriteOpts.opId?`, (b) document consumer-owned idem key, or (c) fold into
+  Phase 5 delivery-above-transport. See 2026-06-30 nf spike entry + `docs/design/nf-integration-spike.md`.
 - **G2-6d-bis — durable reconnect-replay is structurally inert** (sandbox; deterministic,
   confirmed by execution): `entry.lastCursor` is updated synchronously in the same
   `onBatch` callback that grows the durable log, so it never lags the log at the moment
@@ -1010,3 +1015,50 @@ new node test); `pnpm test:browser` 24/24 browser tests passing (was 22; +2 new 
 they claim to verify — engine-local reconnect composition via a minimal test-local durable fork
 driven by real transport lifecycle events, with ephemeral-exclusion exercised. B3 (peer-pull
 recovery via `create-sync.ts`'s fork) remains open, unaffected, deferred to Phase 5.
+
+---
+
+### 2026-06-30 — Phase 4 first-consumer spike: `@neutro/form` seam ↔ `ns` — binding validated, two API findings [SPIKE — findings open]
+
+Executed sandbox spike (throwaway code; durable analysis in `docs/design/nf-integration-spike.md`).
+Bound `ns`'s real public `createSync` surface to a **faithful stand-in** of `@neutro/form`'s verified
+seam (`FormInstance.subscribeToPath` / `set(path,val,SetOptions)` / `submit`; `SetOptions` has no
+origin/silent flag). Two `ns` clients + two forms over a seeded lossy channel (30% drop + reorder +
+duplicate), ≥2 replicas per the spike rule. Scope: connected-only; **B3 reconnect out**; all three
+§9 form rows. Real-nf runtime integration (real DOM/validation/`Path<T>`) is deferred to CC.
+
+**Result — binding shape composes.** All three §9 rows converge, robust across 13 seeds:
+field-state (durable state; `subscribeToPath`→`set`, concurrent same-field edit → resolver winner),
+submit (durable op; `onSubmit`→`do`), typing-indicator (ephemeral state; synthetic — nf has no native
+presence field). `unit` = nf `Path<T>`. Echo guard (an `applying: Set<path>` gating the outbound
+emit while an inbound `set` is applied) proven clean — nf gives no origin flag, so cycle-breaking is
+the adapter's job. The binding is consumer-side glue over `ns`'s public surface only; `ns` stays
+standalone (no `ns`-side nf adapter, no `neutro/*` import in `src/core`). The axiom holds in practice.
+
+**Finding 1 [API gap, open] — op dedup unusable for consumer-driven redelivery.** `do()` mints the
+op `ChangeId` internally as a monotonic counter; the consumer cannot supply a stable op id. Proven:
+two `do("submit",{p:1})` with identical payload+unit apply **twice** (`APPLIED_COUNT=2`) — re-delivery
+double-applies. A consumer needing at-least-once delivery + exactly-once effect must carry its own
+idempotency key **inside the op value** and dedup on receipt; `ns`'s id-dedup cannot serve this
+through the public surface. Options (undecided): (a) `WriteOpts.opId?` caller-supplied stable id;
+(b) document "carry your own idem key" as the required pattern; (c) fold into Phase 5
+delivery-above-transport. Not decided in this spike — surfaced.
+
+**Finding 2 [contract made concrete] — no delivery reliability; consumer must re-drive.** `ns` has no
+retry/redelivery; a durable write dropped by the channel is lost permanently, and draining longer
+cannot recover it (buffering ≠ redelivery). With writes emitted once, convergence is seed-dependent
+(5/10 seeds failed); with the consumer re-driving each write until observed, convergence is robust
+across all 13 seeds. State/ephemeral are safe to blindly re-emit (idempotent by version); ops are not
+(Finding 1). This is §7 "delivery lives above the transport" made concrete: the reliability layer is
+the consumer's until Phase 5 builds retry/backpressure/ack.
+
+**Consequence for charter §8 Phase 4 exit.** "An app syncs a real consumer end-to-end" is **not
+robustly achievable on the current API** without the consumer reimplementing delivery reliability;
+Finding 1 makes that reimplementation awkward for ops specifically. The binding model is validated;
+the two findings gate a *robust* end-to-end integration. First G3 (LCD-risk) datapoint: the seam
+generalizes to nf's three rows cleanly, but the honest cost it exposes is that `ns` offloads all
+delivery reliability to the consumer — a purpose-built form-sync engine would bundle it.
+
+**Artifacts:** `docs/design/nf-integration-spike.md` (reusable analysis + replay: seeded script,
+recorded output, seed sweep). Spike code discarded from sandbox per artifact discipline; the design
+doc + this entry are the durable record.
