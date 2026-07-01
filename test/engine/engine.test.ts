@@ -15,9 +15,6 @@ import {
 } from "../../src/core/types.ts";
 import type {
 	ChangeBatch,
-	Conflict,
-	Resolution,
-	Resolver,
 	Scope,
 } from "../../src/core/types.ts";
 import { LWWClockStrategy } from "../../src/strategies/lww.ts";
@@ -520,22 +517,11 @@ describe("P5 · LWW take-by-version: Resolver is never invoked", () => {
 		const scope = makeScope("doc-5");
 		const clock = new LWWClockStrategy();
 
-		// Resolver that throws — any invocation means the engine incorrectly
-		// routed to conflict resolution when a clear before/after existed.
-		const throwingResolver: Resolver = {
-			resolve(_conflict: Conflict): Resolution {
-				throw new Error(
-					"Resolver must not be called when compare() returns before/after",
-				);
-			},
-		};
-
-		const engine0 = new Engine(new LWWClockStrategy(), {
-			resolver: throwingResolver,
-		});
-		const engine1 = new Engine(new LWWClockStrategy(), {
-			resolver: throwingResolver,
-		});
+		// No resolver is passed to Engine — resolver is wired externally via ResolverPump.
+		// The test verifies that concurrent detection does not fire when compare() returns
+		// before/after (i.e., the engines converge without any conflict).
+		const engine0 = new Engine(new LWWClockStrategy());
+		const engine1 = new Engine(new LWWClockStrategy());
 
 		const { allChannels, throwIfErrors } = setupGossip(
 			[engine0, engine1],

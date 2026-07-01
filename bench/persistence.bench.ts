@@ -24,6 +24,7 @@ import { makeChangeId, makeScope, makeConflictUnit, DURABLE } from "../src/core/
 const scope = makeScope("s-bench");
 const DB_WRITE = "ns-bench-write";
 const DB_REPLAY = "ns-bench-replay";
+const DB_RELOAD = "ns-bench-reload";
 
 async function seedStore(dbName: string, n: number): Promise<void> {
   const store = new IndexedDBStore(dbName);
@@ -79,8 +80,8 @@ describe("D7 — Persistence baseline (CC/CI only)", () => {
   }, { setup: async () => { await seedStore(DB_REPLAY, 1000); } });
 
   bench("reload-to-ready — store open + hydrateScope() for 1000 records", async () => {
-    const store = new IndexedDBStore(DB_REPLAY); // new instance = simulated reload
+    const store = new IndexedDBStore(DB_RELOAD); // new instance = simulated reload
     const engine = new Engine(new LWWClockStrategy(0), { store });
     await engine.hydrateScope(scope);
-  }, { setup: async () => { await seedStore(DB_REPLAY, 1000); } });
+  }, { setup: async () => { await seedStore(DB_RELOAD, 1000); } });
 });

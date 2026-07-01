@@ -203,6 +203,9 @@ engine tests after `drainToQuiescence()`.
 
 ---
 
+## Known gaps (Phase 5)
+- **Open conflicts not persisted**: if a process terminates while a conflict is unresolved, the remote competing change is lost from memory. Re-delivery after reload re-triggers the conflict correctly (T1 idempotency), but the behavior across a reload boundary is undocumented. Phase 5 conflict resolution work should address this.
+
 ## Known gaps / defects
 
 ### RESOLVED — `seenIds` eviction strategy [Phase 3 / D0–D5, 2026-06-30]

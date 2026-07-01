@@ -31,6 +31,9 @@ export interface ScopeConfig {
 export interface SyncConfig {
 	transport: Transport;
 	scopes?: Record<string, ScopeConfig>;
+	/** Persistence store for the durable log and cursor. Use {@link MemoryStore} (default / in-memory,
+	 * no import needed — omit this field) or {@link IndexedDBStore} from `@neutro/sync/persistence`
+	 * for durable browser storage. Not a public seam type — do not implement custom stores outside of tests. */
 	store?: PersistenceStore;
 }
 
@@ -149,7 +152,6 @@ export function createSync(config: SyncConfig): SyncClient {
 	function _buildHandle(key: string, cfg: ScopeConfig): ScopeHandle {
 		const scopeObj = makeScope(key);
 		const engine = new Engine(cfg.strategy, {
-			resolver: cfg.resolver,
 			store: config.store,
 		});
 

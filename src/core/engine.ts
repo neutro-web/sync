@@ -60,7 +60,6 @@ import {
 	type Feed,
 	type OpChange,
 	type Resolution,
-	type Resolver,
 	type Scope,
 	type ScopeRouter,
 	type Snapshot,
@@ -145,7 +144,6 @@ interface ScopeState {
 
 export class Engine implements Feed, ScopeRouter {
 	private readonly _clock: ClockStrategy;
-	private readonly _resolver?: Resolver;
 	private readonly _store?: PersistenceStore;
 	private readonly _chunkSize: number;
 	/** Per-scope state. Created lazily on first use. */
@@ -154,13 +152,11 @@ export class Engine implements Feed, ScopeRouter {
 	constructor(
 		clock: ClockStrategy,
 		opts?: {
-			resolver?: Resolver;
 			store?: PersistenceStore;
 			chunkSize?: number;
 		},
 	) {
 		this._clock = clock;
-		this._resolver = opts?.resolver;
 		this._store = opts?.store;
 		this._chunkSize = opts?.chunkSize ?? Number.MAX_SAFE_INTEGER;
 	}
@@ -203,11 +199,12 @@ export class Engine implements Feed, ScopeRouter {
 			// Mark all persisted ids seen so seenIds dedup works correctly post-hydration (D0-b).
 			state.seenIds.add(change.id.value);
 		}
-		// If cursor was never explicitly persisted but records exist, derive from last seq.
-		if (storedCursor === null && records.length > 0) {
-			// biome-ignore lint/style/noNonNullAssertion: records.length > 0 guarded above
-			state.cursorSeq = records[records.length - 1]!.seq;
-		}
+		// Self-healing: take the max of the stored cursor and the last record seq.
+		// This handles partial-write (appendChange succeeded, writeCursor crashed) without
+		// special-casing storedCursor === null — Math.max(0, lastSeq) covers both paths.
+		// biome-ignore lint/style/noNonNullAssertion: records.length > 0 guarded by ternary
+		const lastRecordSeq = records.length > 0 ? records[records.length - 1]!.seq : 0;
+		state.cursorSeq = Math.max(storedCursor ?? 0, lastRecordSeq);
 		this._scopes.set(key, state);
 	}
 
