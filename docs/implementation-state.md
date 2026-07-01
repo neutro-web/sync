@@ -13,11 +13,11 @@ the source, the source wins and this file is stale → fix it.
 **Maintenance.** Update in the same pass that lands code, as a ready-to-commit edit (same
 discipline as log entries). Keep it to roughly this length; detail belongs in the code.
 
-Last verified against source: **2026-06-30 (Phase 3 Persistence D0–D7 complete; Phase B B1/B2 complete; B3 finding open).** Seam Contract **v1.1**.
+Last verified against source: **2026-06-30 (Phase 3 Persistence D0–D7 complete; Phase B B1/B2 complete, B3 finding open; Phase 3 Real Transports T0–T7 complete).** Seam Contract **v1.1**.
 
 ---
 
-## Status: PHASE 3 PERSISTENCE COMPLETE — `PersistenceStore` interface, `IndexedDBStore`, replay-after-reload, baseline numbers
+## Status: PHASE 3 REAL TRANSPORTS COMPLETE — `BroadcastChannelTransport`, `WebSocketTransport`, wire codec, WS relay fixture
 
 Phase 3 Persistence (D0–D7) is complete. **D0** resolved cursor-advancement semantics (durable-accept, cursor-gated
 seenIds). **D1–D5** built the pluggable persistence substrate: `PersistenceStore` interface + `MemoryStore` (D1),
@@ -25,8 +25,15 @@ real `IndexedDBStore` with dual schema (changes + cursors, D2–D5), and replay-
 cursor recovery + op-dedup across restart. **D6** chunked `changes()` replay. **D7** captured baseline
 numbers (durable write latency, replay throughput, reload-to-ready). Phase B landed `CRDTPositionStrategy`
 (B1) and op-concurrent routing through Model C (B2); B3 surfaced a confirmed defect in the durable reconnect
-branch (see "Known gaps" below). **142/142 tests passing**; `tsc --noEmit` clean; lint clean. HEAD `3bcf36c`.
-Seam Contract **v1.1** frozen (no T1–T5 change).
+branch (see "Known gaps" below). Phase 3 Real Transports (T0–T7) is now also complete: `BroadcastChannelTransport`
+(cross-tab, gate T1/T2/T3-BC) and `WebSocketTransport` (cross-device, gate T4) both implement `Transport` against
+the frozen seam contract with no changes to `src/transports/in-process.ts`, `src/core/types.ts`,
+`docs/seam-contract.md`, or `test/harness/`; a JSON wire codec (`wire-codec.ts`) provides the WebSocket
+serialize/deserialize boundary; a WS relay fixture backs the WebSocket test/bench suite. **T3-BC and T6 verify
+engine-local reconnect only** (same engine instance reconnecting to its transport) — NOT peer-pull recovery
+across two separate peers; the B3 defect (peer reconnect recovery) remains open for Phase 5 (see "Known gaps"
+below). **150/150 node tests, 22/22 browser tests, 3/3 e2e specs passing**; `tsc --noEmit` clean; lint clean.
+Seam Contract **v1.1** frozen (no T1–T5 change; regression-guard diff against frozen files is empty).
 
 ---
 
@@ -83,8 +90,9 @@ not built · **—** = not created.
 | File | Status | Notes |
 |---|---|---|
 | `src/transports/in-process.ts` | REAL | `InProcessTransport implements Transport`. `channelFn` injectable by harness. `send()` resolves on hand-off (§7). `_deliver()` for inbound push. `_setConnected()` fires connect/disconnect handlers (T3 reconnect lifecycle hook). `static pair()` for direct no-fault pairing. |
-| BroadcastChannel | — | Phase 3 (real hardware). |
-| WebSocket / http-poll | — | Phase 3 (real hardware). |
+| `src/transports/broadcast-channel.ts` | REAL | `BroadcastChannelTransport implements Transport`, real cross-tab transport over `BroadcastChannel`. `send()` resolves on `postMessage` hand-off (§7), not ack. No native connect/disconnect event on `BroadcastChannel`, so tab lifecycle (`pageshow`/`pagehide`) is mapped onto `onConnect`/`onDisconnect` (gate T3-BC). `close()` tears down the channel and window listeners. |
+| `src/transports/websocket.ts` | REAL | `WebSocketTransport implements Transport`, real cross-device transport over a `WebSocket` client connection (gate T4). `WebSocketImpl` injectable (Node tests pass `ws`'s class; browser/runtime defaults to global `WebSocket`, keeping `ns` dependency-free at runtime). `send()` queues client-side and flushes on `onopen` if the socket isn't open yet — still hand-off semantics, no ack/retry/backpressure (§7). Uses `wire-codec.ts` to encode/decode messages. |
+| `src/transports/wire-codec.ts` | REAL | `encodeBatch`/`decodeBatch` — plain `JSON.stringify`/`JSON.parse` wire codec for `ChangeBatch`, the WebSocket transport's serialize/deserialize boundary (gate T0-2). Branded types (`Version`/`Cursor`/etc.) are compile-time only and survive JSON as structurally-equivalent plain objects; no runtime re-casting needed since `ClockStrategy.compare()`/`mergeVersions()` operate structurally. |
 
 ### `src/client/` → public API layer
 | File | Status | Notes |
@@ -236,6 +244,14 @@ Fix requires deciding when `lastCursor` advances (confirmed-delivery, not durabl
 and/or a pull-based catch-up seam — both are §7 delivery-above-transport territory
 (Phase 5). NOT fixed in Phase 3; see decision-log Phase B / B3 entry.
 
+**Phase 3 Real Transports (T0–T7, 2026-06-30) does not close this finding.** The new
+`test/e2e/broadcast-channel-reconnect.spec.ts` (gate T3-BC) and `test/websocket/websocket-reconnect.test.ts`
+(gate T6) verify **engine-local reconnect only** — the same engine instance reconnecting to its own
+transport after a disconnect/reload, hydrating its own durable writes. Neither test exercises
+peer-pull recovery across two separate peers (one peer catching up on another peer's writes made
+while disconnected). The B3 defect described above — the durable reconnect-replay branch cannot
+pull a peer's missed writes — remains open for Phase 5.
+
 ### OPEN (Phase 5) — Peer-recovery / pull-based catch-up seam
 The durable-reconnect finding's second half (the mechanism only self-publishes, never pulls
 a peer's missed writes) is explicitly deferred to Phase 5 as a delivery-above-transport
@@ -260,6 +276,7 @@ on cursor/replay will be Phase 5 work. Documented at retry sites in the code.
   consumer binds to `ns` on its own side; there is no `ns`-side adapter package in core scope.
 - **G2 Public API** — CLOSED 2026-06-29. Implementation complete, automated, mutation-verified.
 - **Phase 3 Persistence (D0–D7)** — CLOSED 2026-06-30. Pluggable persistence + IndexedDB + replay-after-reload + baseline numbers. **142 tests passing**.
+- **Phase 3 Real Transports (T0–T7)** — CLOSED 2026-06-30. `BroadcastChannelTransport` + `WebSocketTransport` + wire codec + WS relay fixture, real against the frozen seam contract. T3-BC/T6 verify engine-local reconnect only, not peer-pull recovery (B3 remains open, see "Known gaps"). **150 node / 22 browser / 3 e2e tests passing**.
 - **G2-6d-bis** — client T3 durable-fork (`onConnect` path) is tested and confirmed
   structurally inert (see "Known gaps"). Fix is Phase 5 (delivery-above-transport) territory.
 - **G3 LCD-risk** — the conformance suite is the eventual evidence; not blocking current phases.
