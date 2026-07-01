@@ -89,3 +89,60 @@ describe("T0-2 — wire codec round-trip", () => {
 		});
 	});
 });
+
+describe("T0-1 — structuredClone round-trip (BroadcastChannel transfer mechanism)", () => {
+	it("Version survives structuredClone and remains compare-consistent", () => {
+		const clock = vectorClock("node-a");
+		const batch = representativeBatch();
+		const cloned = structuredClone(batch);
+
+		const originalV1 = (batch.changes[0] as { version: unknown }).version;
+		const clonedV1 = (cloned.changes[0] as { version: unknown }).version;
+		expect(() =>
+			clock.compare(
+				// biome-ignore lint/suspicious/noExplicitAny: comparing branded Version tokens in test
+				clonedV1 as any,
+				// biome-ignore lint/suspicious/noExplicitAny: comparing branded Version tokens in test
+				originalV1 as any,
+			),
+		).not.toThrow();
+		expect(clonedV1).toEqual(originalV1);
+	});
+
+	it("ConflictUnit.key, ChangeId.value, Scope.key, Cursor._seq, lifetime all match post-clone", () => {
+		const batch = representativeBatch();
+		const cloned = structuredClone(batch);
+
+		expect(cloned.scope.key).toBe(batch.scope.key);
+		expect(cloned.cursor?._seq).toBe(batch.cursor?._seq);
+		expect(cloned.changes[0].id.value).toBe(batch.changes[0].id.value);
+		expect(cloned.changes[0].unit.key).toBe(batch.changes[0].unit.key);
+		expect(cloned.changes[0].lifetime).toEqual(batch.changes[0].lifetime);
+		expect(cloned.changes[1].lifetime).toEqual(batch.changes[1].lifetime);
+	});
+
+	it("value round-trips for structured-cloneable payload types", () => {
+		const batch = representativeBatch();
+		const cloned = structuredClone(batch);
+		expect(cloned.changes[0].value).toEqual(batch.changes[0].value);
+	});
+
+	it("a non-cloneable value (function) throws at the clone boundary rather than silently dropping", () => {
+		const scope = makeScope("s-wire-bad");
+		const badBatch = {
+			scope,
+			changes: [
+				{
+					id: makeChangeId("c-bad"),
+					kind: "state" as const,
+					scope,
+					unit: makeConflictUnit("u-bad"),
+					lifetime: DURABLE,
+					value: () => {}, // functions are not structured-cloneable
+					version: vectorClock("node-a").mint(),
+				},
+			],
+		};
+		expect(() => structuredClone(badBatch)).toThrow();
+	});
+});
