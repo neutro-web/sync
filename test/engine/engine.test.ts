@@ -13,10 +13,7 @@ import {
 	makeConflictUnit,
 	makeScope,
 } from "../../src/core/types.ts";
-import type {
-	ChangeBatch,
-	Scope,
-} from "../../src/core/types.ts";
+import type { ChangeBatch, Scope } from "../../src/core/types.ts";
 import { LWWClockStrategy } from "../../src/strategies/lww.ts";
 import { drainChannels, setupGossip } from "../harness/gossip-harness.ts";
 
