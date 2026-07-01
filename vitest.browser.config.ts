@@ -5,7 +5,7 @@ export default defineConfig({
   test: {
     include: ["test/browser/**/*.test.ts"],
     benchmark: {
-      include: ["bench/**/*.bench.ts"],
+      include: ["bench/persistence.bench.ts", "bench/transport.bench.ts"],
     },
     browser: {
       enabled: true,

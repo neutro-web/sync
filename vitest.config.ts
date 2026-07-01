@@ -4,5 +4,8 @@ export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
     exclude: ["test/browser/**"],
+    benchmark: {
+      include: ["bench/websocket.bench.ts"],
+    },
   },
 });

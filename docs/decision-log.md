@@ -25,7 +25,7 @@
 
 ## Current State
 
-_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 persistence **D0–D6 complete; D7 numbers pending a CC/CI browser bench run**. G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (not closed). D0 cursor-advancement decision logged and implemented.
+_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 persistence **D0–D7 complete**. Phase 3 Real Transports **T0–T7 CLOSED** — `BroadcastChannelTransport`, `WebSocketTransport`, wire codec, WS relay fixture, full test/bench suite, all against the frozen seam contract (regression-guard diff empty). T3-BC/T6 verify engine-local reconnect only, not peer-pull recovery. G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (peer reconnect recovery) — remains open, deferred to Phase 5, unaffected by the transports gate. D0 cursor-advancement decision logged and implemented.
 
 ### Status at a glance
 - **Seam contract:** v1.1. T1–T5 ratified; eight seam types defined; §9 consumer map
@@ -33,11 +33,15 @@ _Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional meth
   optional method (2026-06-29). Founding semantics otherwise unchanged.
 - **Governance scaffold:** Complete. Charter, custom instructions, AGENTS.md, decision log,
   implementation-state all in place.
-- **Code:** Phase 3 persistence **D0–D6 complete; D7 (baseline numbers) open pending CC/CI run**. G2 Public API complete (2026-06-29).
-  Phase B: B2 (`_applyOp` concurrent routing via Model C, op storage carries full
-  `VersionedChange`) and B1 (`CRDTPositionStrategy` — closes the charter Phase 2 "three
-  strategies" letter gap) landed and locked. B3 surfaced a confirmed defect in the client's
-  durable reconnect-replay branch (see Log, 2026-06-30) — NOT closed. **142 node tests + 11 browser tests (Playwright/IndexedDB, CC/CI-only) passing**; `tsc --noEmit` clean; lint clean. HEAD `85162bc`.
+- **Code:** Phase 3 persistence **D0–D7 complete**. Phase 3 Real Transports **T0–T7 complete**
+  (`BroadcastChannelTransport`, `WebSocketTransport`, `wire-codec.ts`, WS relay fixture). G2
+  Public API complete (2026-06-29). Phase B: B2 (`_applyOp` concurrent routing via Model C, op
+  storage carries full `VersionedChange`) and B1 (`CRDTPositionStrategy` — closes the charter
+  Phase 2 "three strategies" letter gap) landed and locked. B3 surfaced a confirmed defect in
+  the client's durable reconnect-replay branch (see Log, 2026-06-30) — NOT closed; the
+  transports gate's T3-BC/T6 reconnect tests verify engine-local reconnect only and do not
+  close B3. **150 node tests + 22 browser tests (Playwright/Chromium) + 3 e2e specs
+  (Playwright) passing**; `tsc --noEmit` clean; lint clean.
 
 ### Locked (do not drift without an explicit superseding entry)
 - **Standalone** — `ns` has no dependency on any neutro sibling. No `neutro/*` runtime import
@@ -819,3 +823,190 @@ and the gate's engine-local-recovery scope). Options for Phase 5: (a) persist `o
 (b) document redelivery-dependency as the guarantee. Depends on the Phase 5
 delivery-above-transport seam (a conflict only re-arrives if the peer re-sends — same §7
 territory as peer-recovery). Not blocking Phase 3 persistence closure.
+
+---
+
+## 2026-06-30 — T7: Transport baseline numbers (Phase 3)
+
+**Benchmark suites created:**
+- `bench/transport.bench.ts` — BroadcastChannel, runs via `pnpm bench` (browser workspace,
+  Playwright/Chromium, `vitest.browser.config.ts`).
+- `bench/websocket.bench.ts` — WebSocket, runs via new `pnpm bench:node` script (Node
+  workspace, real `ws` relay process, `vitest.config.ts`). `vitest.config.ts` previously had no
+  `benchmark` block; added one scoped to `bench/websocket.bench.ts` only, so node and browser
+  bench suites don't cross-pollinate (`vitest.browser.config.ts`'s `benchmark.include` was
+  narrowed from `bench/**/*.bench.ts` to the two browser-safe files explicitly, since the
+  WebSocket bench imports Node's `ws` package and cannot run in a browser context).
+
+**Numbers captured (2026-06-30, this machine, CC/CI-equivalent local run —
+`pnpm bench` = Playwright/Chromium, `pnpm bench:node` = Node/real relay process):**
+
+`pnpm bench:node` (WebSocket, real `ws` relay on localhost, cross-process):
+```
+✓ bench/websocket.bench.ts > T7 — WebSocket baseline (CC/CI only) 1673ms
+    name                                                                         hz      min      max     mean      p75      p99     p995     p999     rme  samples
+  · send→receive latency — 1-change batch over real relay (N=1 round-trip)  18.4654  52.8560  55.6623  54.1555  55.2755  55.6623  55.6623  55.6623  ±1.40%       10
+  · batch throughput — 100 sequential 1-change batches over real relay      16.4635  58.9980  64.8431  60.7404  61.4662  64.8431  64.8431  64.8431  ±2.37%        9
+```
+
+`pnpm bench` (BroadcastChannel, Playwright/Chromium, part of the same browser bench run that
+also re-confirms D7's `bench/persistence.bench.ts`):
+```
+✓ |chromium| bench/transport.bench.ts > T7 — BroadcastChannel baseline (CC/CI only) 602ms
+    name                                                       hz     min     max    mean     p75     p99    p995    p999     rme  samples
+  · cross-tab round-trip latency — 1-change batch (N=1)  9,174.00  0.0000  5.5000  0.1090  0.1000  0.2000  0.3000  1.6000  ±3.41%     4587
+```
+
+**Measurement semantics:**
+- WebSocket "send→receive latency" — time from `transport.send()` hand-off to the peer's
+  `receive()` callback firing, over a real `ws` relay process on localhost. Denominator: per
+  single `ChangeBatch` containing exactly 1 `Change`. Includes one full round-trip through the
+  relay (not just send hand-off) — this is a cross-process/network number, distinct from the
+  in-process send-only timing in `websocket-transport.test.ts`.
+- WebSocket "batch throughput" — 100 sequential 1-change batches, denominator = batches/sec,
+  `hz` column above is the bench-loop iteration rate (5 configured iterations per the `{
+  iterations: 5 }` bench option), i.e. each "op" is one full 100-batch drain cycle.
+- BroadcastChannel "cross-tab round-trip latency" — same-context (not literally cross-tab, but
+  same real-browser IPC boundary `BroadcastChannel` always crosses) round trip from
+  `transport.send()` on channel A to channel B's `receive()` firing. Denominator: per single
+  `ChangeBatch` containing exactly 1 `Change`.
+
+Both numbers were captured from real transport implementations exercising real carriers
+(a real `ws` WebSocket server process for the relay, real browser `BroadcastChannel` IPC in
+Playwright/Chromium) — no sandbox/in-process number is presented as a transport baseline here,
+per the T7 gate requirement.
+
+**Config changes:** Added `benchmark: { include: ["bench/websocket.bench.ts"] }` to
+`vitest.config.ts`; added `"bench:node": "vitest bench --config vitest.config.ts"` to
+`package.json` scripts; narrowed `vitest.browser.config.ts`'s `benchmark.include` from
+`bench/**/*.bench.ts` to `["bench/persistence.bench.ts", "bench/transport.bench.ts"]`.
+
+**Seam impact:** None. No change to `docs/seam-contract.md`, `src/core/types.ts`,
+`test/harness/`, or `src/transports/in-process.ts`.
+
+**Gate impact:** Closes T7 (baseline transport numbers, bench, CC/CI only).
+
+---
+
+## 2026-06-30 — Phase 3 Real Transports (T0–T7) CLOSED [GATE COMPLETE]
+
+All gate items T0–T7 are verified complete. Summary of what landed across the phase:
+
+- **Wire codec (`src/transports/wire-codec.ts`, gate T0-2):** `encodeBatch`/`decodeBatch`, a
+  plain JSON wire boundary for `ChangeBatch`. Branded types (`Version`/`Cursor`/etc.) are
+  compile-time only and survive JSON as structurally-equivalent plain objects — verified
+  structurally-parity (`structuredClone`-equivalent round-trip) against the in-process path, no
+  runtime re-casting needed since `ClockStrategy.compare()`/`mergeVersions()` operate
+  structurally.
+- **`BroadcastChannelTransport` (`src/transports/broadcast-channel.ts`, gates T1/T2/T3-BC):**
+  real cross-tab `Transport` over `BroadcastChannel`. Tab lifecycle (`pageshow`/`pagehide`)
+  mapped onto `onConnect`/`onDisconnect` since `BroadcastChannel` has no native connect/
+  disconnect event.
+- **`WebSocketTransport` (`src/transports/websocket.ts`, gates T4/T6):** real cross-device
+  `Transport` over a `WebSocket` client connection, backed by a WS relay fixture for tests/
+  bench. `WebSocketImpl` injectable (Node tests use `ws`'s class; runtime defaults to the
+  global `WebSocket`, keeping `ns` dependency-free). Client-side send queue flushes on
+  `onopen`, preserving hand-off (§7) semantics across the connect race.
+- **T7 (previous entry above):** baseline numbers captured for both transports against real
+  carriers (real `ws` relay process, real browser `BroadcastChannel` IPC via Playwright/
+  Chromium) — no sandbox/in-process number presented as a transport baseline.
+- **Full T0–T7 test/bench suite:** node (`pnpm test`, 150 passing), browser (`pnpm
+  test:browser`, 22 passing, Playwright/Chromium — includes BroadcastChannel + WS transport
+  tests), e2e (`pnpm test:e2e`, 3 Playwright specs passing — includes
+  `test/e2e/broadcast-channel-cross-tab.spec.ts` and
+  `test/e2e/broadcast-channel-reconnect.spec.ts`), plus `test/websocket/websocket-reconnect.test.ts`
+  (node). `tsc --noEmit` clean; `biome check` clean.
+
+**Regression guard:** `git diff --name-only main -- docs/seam-contract.md src/core/types.ts
+test/harness/ src/transports/in-process.ts` is empty — the frozen seam contract, core types,
+harness, and the existing in-process transport are byte-identical to `main`. No seam-contract
+or core-type change; Seam Contract remains **v1.1**.
+
+**T3-BC / T6 scope boundary — explicit, do not overstate:** the `test/e2e/broadcast-channel-
+reconnect.spec.ts` (T3-BC) and `test/websocket/websocket-reconnect.test.ts` (T6) reconnect
+tests verify **engine-local reconnect only** — the same engine instance reconnecting to its
+own transport after a disconnect/reload, hydrating its own durable writes via the existing
+persistence layer. Neither test exercises **peer-pull recovery** across two separate peers
+(one peer catching up on writes another peer made while it was disconnected). This is the same
+boundary documented in `docs/implementation-state.md`'s "Known gaps" section (B3 addendum,
+2026-06-30). **The B3 finding (peer reconnect recovery is not implemented — the durable
+reconnect-replay branch only self-publishes, never pulls a peer's missed writes) remains open,
+unaffected by this phase, and is deferred to Phase 5.**
+
+**Files landed this phase:** `src/transports/broadcast-channel.ts`,
+`src/transports/websocket.ts`, `src/transports/wire-codec.ts`, `bench/transport.bench.ts`,
+`bench/websocket.bench.ts`, plus the T0–T7 test suites referenced above.
+
+**Seam impact:** None (frozen files verified byte-identical to `main`, see regression guard
+above).
+
+**Gate impact:** Closes Phase 3 Real Transports (T0–T7) in full.
+
+---
+
+## 2026-06-30 — T3-BC / T6 test-depth fix pass (independent-audit findings)
+
+An independent audit of the Phase 3 Real Transports work found the T3-BC and T6 reconnect tests,
+as originally written, did not actually test what the gate claims. Three findings, all fixed in
+this pass; no scope beyond the existing T0–T7 gate.
+
+**Finding 1 — the gate's core claim ("`onConnect` drives the durable replay fork" / "the
+persistence and transport layers compose") was not tested.** The original T3-BC spec
+(`test/e2e/broadcast-channel-reconnect.spec.ts`) never constructed a `BroadcastChannelTransport`
+at all — it was a pure IndexedDB hydration test. The original T6 spec
+(`test/websocket/websocket-reconnect.test.ts`) constructed a `WebSocketTransport` but its
+`onConnect` never drove anything; the transport sat inert next to a separately-rehydrated
+`Engine`. Fixed by building a **minimal, test-local "durable reconnect fork" directly on the raw
+Engine + Transport seam in each test**: an `onConnect` handler that captures
+`lastCursorBeforeDisconnect`, then on connect calls `engine.changes(scope, lastCursorBeforeDisconnect)`
+and forwards each yielded batch via `transport.send()`. This is wired onto REAL transport
+lifecycle events — a real `window.dispatchEvent(new Event("pageshow"))` for
+BroadcastChannel, and a real socket reconnect (`open` event) over the WS relay fixture for
+WebSocket — and the test asserts the batches actually sent match exactly the durable tail added
+after the captured cursor. **This is explicitly NOT `create-sync.ts`'s fork** — `test/client/
+reconnect.test.ts` (the B3 finding) already proves `create-sync.ts`'s `onConnect` handler can
+never emit a replay batch under any sequence of events, because `entry.lastCursor` is always
+exactly at the tip of the log by the time `onConnect` fires. Wiring `createSync` here would just
+re-hit that confirmed-broken path, so `src/client/create-sync.ts` was left untouched. The new
+tests prove the engine-local composition works when *something* correctly drives
+`engine.changes(cursor)` from a transport's real connect event — they do not close B3, and do not
+claim `create-sync.ts`'s existing fork is fixed.
+
+**Finding 2 — "ephemeral does not survive" was asserted in test titles but never exercised.**
+Both T3-BC and T6 now add an ephemeral change (`lifetime: ephemeral(ttlMs)`) alongside a durable
+change within the reconnect scenario, and assert the durable-cursor replay (`engine.changes()`)
+sends only the durable change — the ephemeral one is excluded, since `changes()` walks only the
+durable log (T3). T3-BC additionally confirms an ephemeral value written in a prior tab session
+does not survive close/reopen (it's absent from the post-reload snapshot), while an ephemeral
+value written live in the current session is correctly visible via `snapshot()` (in-memory,
+session-scoped — not replayed via cursor).
+
+**Finding 3 — `BroadcastChannelTransport`'s `pageshow`/`pagehide` → `onConnect`/`onDisconnect`
+mapping had zero test coverage.** Added two tests to `test/browser/broadcast-channel.test.ts`
+(real `BroadcastChannel` + real `window`, Vitest browser workspace): dispatching real `pageshow`/
+`pagehide` `Event`s and asserting the transport's registered `onConnect`/`onDisconnect` handlers
+fire, and that they stop firing after `close()`. This exercises the actual production code at
+`src/transports/broadcast-channel.ts:24-36` directly, not through a Playwright e2e harness.
+
+**No source changes.** `src/transports/broadcast-channel.ts`, `src/transports/websocket.ts`,
+`src/client/create-sync.ts`, `src/core/types.ts`, `docs/seam-contract.md`, and `test/harness/` are
+untouched — this pass only deepens test coverage of existing, previously-under-tested behavior.
+`test/e2e/fixtures/harness.ts` gained additional `window.__ns` bridge exports
+(`DURABLE`, `ephemeral`, `makeChangeId`, `makeConflictUnit`) needed by the new T3-BC test.
+
+**Files changed:** `test/e2e/broadcast-channel-reconnect.spec.ts` (rewritten),
+`test/websocket/websocket-reconnect.test.ts` (new test added), `test/browser/broadcast-
+channel.test.ts` (two new tests added), `test/e2e/fixtures/harness.ts` (additional exports),
+`docs/implementation-state.md`, `docs/decision-log.md` (this entry).
+
+**Standing gates:** `pnpm typecheck` clean; `pnpm test` 151/151 node tests passing (was 150; +1
+new node test); `pnpm test:browser` 24/24 browser tests passing (was 22; +2 new browser tests);
+`pnpm test:e2e` 3/3 e2e specs passing (unchanged count, T3-BC spec rewritten); `pnpm lint` clean.
+
+**Seam impact:** None. `docs/seam-contract.md`, `src/core/types.ts`, `test/harness/`,
+`src/transports/in-process.ts`, and `src/client/create-sync.ts` are unchanged.
+
+**Gate impact:** T3-BC and T6 (`docs/gates/phase3-transports.md`) now demonstrably verify what
+they claim to verify — engine-local reconnect composition via a minimal test-local durable fork
+driven by real transport lifecycle events, with ephemeral-exclusion exercised. B3 (peer-pull
+recovery via `create-sync.ts`'s fork) remains open, unaffected, deferred to Phase 5.
