@@ -4,7 +4,13 @@
  */
 import { createSync } from "../../../src/client/create-sync.ts";
 import { Engine } from "../../../src/core/engine.ts";
-import { makeScope } from "../../../src/core/types.ts";
+import {
+	DURABLE,
+	ephemeral,
+	makeChangeId,
+	makeConflictUnit,
+	makeScope,
+} from "../../../src/core/types.ts";
 import { IndexedDBStore } from "../../../src/persistence/idb-store.ts";
 import { lww } from "../../../src/strategies/index.ts";
 import { BroadcastChannelTransport } from "../../../src/transports/broadcast-channel.ts";
@@ -17,4 +23,8 @@ import { BroadcastChannelTransport } from "../../../src/transports/broadcast-cha
 	Engine,
 	IndexedDBStore,
 	makeScope,
+	DURABLE,
+	ephemeral,
+	makeChangeId,
+	makeConflictUnit,
 };

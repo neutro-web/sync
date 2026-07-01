@@ -941,3 +941,72 @@ unaffected by this phase, and is deferred to Phase 5.**
 above).
 
 **Gate impact:** Closes Phase 3 Real Transports (T0–T7) in full.
+
+---
+
+## 2026-06-30 — T3-BC / T6 test-depth fix pass (independent-audit findings)
+
+An independent audit of the Phase 3 Real Transports work found the T3-BC and T6 reconnect tests,
+as originally written, did not actually test what the gate claims. Three findings, all fixed in
+this pass; no scope beyond the existing T0–T7 gate.
+
+**Finding 1 — the gate's core claim ("`onConnect` drives the durable replay fork" / "the
+persistence and transport layers compose") was not tested.** The original T3-BC spec
+(`test/e2e/broadcast-channel-reconnect.spec.ts`) never constructed a `BroadcastChannelTransport`
+at all — it was a pure IndexedDB hydration test. The original T6 spec
+(`test/websocket/websocket-reconnect.test.ts`) constructed a `WebSocketTransport` but its
+`onConnect` never drove anything; the transport sat inert next to a separately-rehydrated
+`Engine`. Fixed by building a **minimal, test-local "durable reconnect fork" directly on the raw
+Engine + Transport seam in each test**: an `onConnect` handler that captures
+`lastCursorBeforeDisconnect`, then on connect calls `engine.changes(scope, lastCursorBeforeDisconnect)`
+and forwards each yielded batch via `transport.send()`. This is wired onto REAL transport
+lifecycle events — a real `window.dispatchEvent(new Event("pageshow"))` for
+BroadcastChannel, and a real socket reconnect (`open` event) over the WS relay fixture for
+WebSocket — and the test asserts the batches actually sent match exactly the durable tail added
+after the captured cursor. **This is explicitly NOT `create-sync.ts`'s fork** — `test/client/
+reconnect.test.ts` (the B3 finding) already proves `create-sync.ts`'s `onConnect` handler can
+never emit a replay batch under any sequence of events, because `entry.lastCursor` is always
+exactly at the tip of the log by the time `onConnect` fires. Wiring `createSync` here would just
+re-hit that confirmed-broken path, so `src/client/create-sync.ts` was left untouched. The new
+tests prove the engine-local composition works when *something* correctly drives
+`engine.changes(cursor)` from a transport's real connect event — they do not close B3, and do not
+claim `create-sync.ts`'s existing fork is fixed.
+
+**Finding 2 — "ephemeral does not survive" was asserted in test titles but never exercised.**
+Both T3-BC and T6 now add an ephemeral change (`lifetime: ephemeral(ttlMs)`) alongside a durable
+change within the reconnect scenario, and assert the durable-cursor replay (`engine.changes()`)
+sends only the durable change — the ephemeral one is excluded, since `changes()` walks only the
+durable log (T3). T3-BC additionally confirms an ephemeral value written in a prior tab session
+does not survive close/reopen (it's absent from the post-reload snapshot), while an ephemeral
+value written live in the current session is correctly visible via `snapshot()` (in-memory,
+session-scoped — not replayed via cursor).
+
+**Finding 3 — `BroadcastChannelTransport`'s `pageshow`/`pagehide` → `onConnect`/`onDisconnect`
+mapping had zero test coverage.** Added two tests to `test/browser/broadcast-channel.test.ts`
+(real `BroadcastChannel` + real `window`, Vitest browser workspace): dispatching real `pageshow`/
+`pagehide` `Event`s and asserting the transport's registered `onConnect`/`onDisconnect` handlers
+fire, and that they stop firing after `close()`. This exercises the actual production code at
+`src/transports/broadcast-channel.ts:24-36` directly, not through a Playwright e2e harness.
+
+**No source changes.** `src/transports/broadcast-channel.ts`, `src/transports/websocket.ts`,
+`src/client/create-sync.ts`, `src/core/types.ts`, `docs/seam-contract.md`, and `test/harness/` are
+untouched — this pass only deepens test coverage of existing, previously-under-tested behavior.
+`test/e2e/fixtures/harness.ts` gained additional `window.__ns` bridge exports
+(`DURABLE`, `ephemeral`, `makeChangeId`, `makeConflictUnit`) needed by the new T3-BC test.
+
+**Files changed:** `test/e2e/broadcast-channel-reconnect.spec.ts` (rewritten),
+`test/websocket/websocket-reconnect.test.ts` (new test added), `test/browser/broadcast-
+channel.test.ts` (two new tests added), `test/e2e/fixtures/harness.ts` (additional exports),
+`docs/implementation-state.md`, `docs/decision-log.md` (this entry).
+
+**Standing gates:** `pnpm typecheck` clean; `pnpm test` 151/151 node tests passing (was 150; +1
+new node test); `pnpm test:browser` 24/24 browser tests passing (was 22; +2 new browser tests);
+`pnpm test:e2e` 3/3 e2e specs passing (unchanged count, T3-BC spec rewritten); `pnpm lint` clean.
+
+**Seam impact:** None. `docs/seam-contract.md`, `src/core/types.ts`, `test/harness/`,
+`src/transports/in-process.ts`, and `src/client/create-sync.ts` are unchanged.
+
+**Gate impact:** T3-BC and T6 (`docs/gates/phase3-transports.md`) now demonstrably verify what
+they claim to verify — engine-local reconnect composition via a minimal test-local durable fork
+driven by real transport lifecycle events, with ephemeral-exclusion exercised. B3 (peer-pull
+recovery via `create-sync.ts`'s fork) remains open, unaffected, deferred to Phase 5.

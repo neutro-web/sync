@@ -13,7 +13,7 @@ the source, the source wins and this file is stale → fix it.
 **Maintenance.** Update in the same pass that lands code, as a ready-to-commit edit (same
 discipline as log entries). Keep it to roughly this length; detail belongs in the code.
 
-Last verified against source: **2026-06-30 (Phase 3 Persistence D0–D7 complete; Phase B B1/B2 complete, B3 finding open; Phase 3 Real Transports T0–T7 complete).** Seam Contract **v1.1**.
+Last verified against source: **2026-06-30 (Phase 3 Persistence D0–D7 complete; Phase B B1/B2 complete, B3 finding open; Phase 3 Real Transports T0–T7 complete; T3-BC/T6 test-depth fix pass complete same day).** Seam Contract **v1.1**.
 
 ---
 
@@ -30,9 +30,15 @@ branch (see "Known gaps" below). Phase 3 Real Transports (T0–T7) is now also c
 the frozen seam contract with no changes to `src/transports/in-process.ts`, `src/core/types.ts`,
 `docs/seam-contract.md`, or `test/harness/`; a JSON wire codec (`wire-codec.ts`) provides the WebSocket
 serialize/deserialize boundary; a WS relay fixture backs the WebSocket test/bench suite. **T3-BC and T6 verify
-engine-local reconnect only** (same engine instance reconnecting to its transport) — NOT peer-pull recovery
-across two separate peers; the B3 defect (peer reconnect recovery) remains open for Phase 5 (see "Known gaps"
-below). **150/150 node tests, 22/22 browser tests, 3/3 e2e specs passing**; `tsc --noEmit` clean; lint clean.
+engine-local reconnect only**: a minimal, test-local durable reconnect fork
+(`onConnect` → `engine.changes(cursor)` → `transport.send()`, built directly on the raw Engine +
+Transport seam, deliberately NOT `create-sync.ts`'s fork) wired onto real transport lifecycle
+events (a real `pageshow` DOM event for BroadcastChannel; a real socket `open` after reconnect for
+WebSocket) — proving the persistence and transport layers compose and that ephemeral state is
+excluded from cursor replay (T3). This is NOT peer-pull recovery across two separate peers, and
+does NOT claim `create-sync.ts`'s own fork works; the B3 defect (peer reconnect recovery) remains
+open for Phase 5 (see "Known gaps" below). **151/151 node tests, 24/24 browser tests, 3/3 e2e specs
+passing**; `tsc --noEmit` clean; lint clean.
 Seam Contract **v1.1** frozen (no T1–T5 change; regression-guard diff against frozen files is empty).
 
 ---
@@ -252,6 +258,29 @@ peer-pull recovery across two separate peers (one peer catching up on another pe
 while disconnected). The B3 defect described above — the durable reconnect-replay branch cannot
 pull a peer's missed writes — remains open for Phase 5.
 
+**Fix pass, 2026-06-30 (post-audit):** an earlier draft of T3-BC/T6 undersold this even further —
+T3-BC never touched `BroadcastChannelTransport` at all (pure IndexedDB hydration test with no
+transport in the loop), and T6 constructed a `WebSocketTransport` but never had its `onConnect`
+actually drive any replay (inert set dressing next to a separately-rehydrated `Engine`). Both were
+rewritten to build a **minimal, test-local "durable reconnect fork"** directly on the raw
+`Engine` + `Transport` seam — NOT `create-sync.ts`'s fork (which the B3 finding proves can never
+emit a replay batch; do not conflate the two): an `onConnect` handler registered in the test itself
+that calls `engine.changes(scope, lastCursorBeforeDisconnect)` and forwards each batch via
+`transport.send()`, wired onto a REAL `BroadcastChannelTransport` (driven by a real
+`window.dispatchEvent(new Event("pageshow"))`) and a REAL `WebSocketTransport` (driven by an
+actual socket close + a fresh socket's real `open` event over the WS relay fixture). Both tests
+now also add an ephemeral change (`lifetime: ephemeral(ttlMs)`) alongside the durable one and
+assert it is excluded from the cursor-based replay (only the durable tail is sent) — closing the
+previously-asserted-but-unexercised "ephemeral does not survive" claim (T3). Separately,
+`test/browser/broadcast-channel.test.ts` gained direct coverage of
+`src/transports/broadcast-channel.ts`'s `pageshow`/`pagehide` → `onConnect`/`onDisconnect` mapping
+(previously zero coverage): real `window.dispatchEvent` of both events against a real
+`BroadcastChannelTransport`, asserting the registered handlers fire (and stop firing after
+`close()`). **This still does not prove peer-pull recovery, and it does not prove `create-sync.ts`'s
+own fork works — B3 remains open, unaffected, Phase 5.** It proves the engine-local composition
+works when something (here, a minimal test-local fork) correctly drives
+`engine.changes(cursor)` from a transport's real connect lifecycle event.
+
 ### OPEN (Phase 5) — Peer-recovery / pull-based catch-up seam
 The durable-reconnect finding's second half (the mechanism only self-publishes, never pulls
 a peer's missed writes) is explicitly deferred to Phase 5 as a delivery-above-transport
@@ -276,7 +305,13 @@ on cursor/replay will be Phase 5 work. Documented at retry sites in the code.
   consumer binds to `ns` on its own side; there is no `ns`-side adapter package in core scope.
 - **G2 Public API** — CLOSED 2026-06-29. Implementation complete, automated, mutation-verified.
 - **Phase 3 Persistence (D0–D7)** — CLOSED 2026-06-30. Pluggable persistence + IndexedDB + replay-after-reload + baseline numbers. **142 tests passing**.
-- **Phase 3 Real Transports (T0–T7)** — CLOSED 2026-06-30. `BroadcastChannelTransport` + `WebSocketTransport` + wire codec + WS relay fixture, real against the frozen seam contract. T3-BC/T6 verify engine-local reconnect only, not peer-pull recovery (B3 remains open, see "Known gaps"). **150 node / 22 browser / 3 e2e tests passing**.
+- **Phase 3 Real Transports (T0–T7)** — CLOSED 2026-06-30; T3-BC/T6 test depth fixed same day
+  (post-audit). `BroadcastChannelTransport` + `WebSocketTransport` + wire codec + WS relay
+  fixture, real against the frozen seam contract. T3-BC/T6 now compose a minimal test-local
+  durable reconnect fork (`onConnect` → `engine.changes(cursor)` → `transport.send()`) onto real
+  transport lifecycle events, and exercise ephemeral-exclusion from replay; still engine-local
+  only, not peer-pull recovery (B3 remains open, see "Known gaps"). **151 node / 24 browser / 3
+  e2e tests passing**.
 - **G2-6d-bis** — client T3 durable-fork (`onConnect` path) is tested and confirmed
   structurally inert (see "Known gaps"). Fix is Phase 5 (delivery-above-transport) territory.
 - **G3 LCD-risk** — the conformance suite is the eventual evidence; not blocking current phases.

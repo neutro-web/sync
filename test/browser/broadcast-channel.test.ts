@@ -74,4 +74,36 @@ describe("T1 — BroadcastChannelTransport, §7-conformant", () => {
 		expect(received).not.toHaveBeenCalled();
 		a.close();
 	});
+
+	it("T3-BC: real window pageshow/pagehide events drive onConnect/onDisconnect", () => {
+		const t = new BroadcastChannelTransport("t3bc-lifecycle");
+		const onConnect = vi.fn();
+		const onDisconnect = vi.fn();
+		t.onConnect(onConnect);
+		t.onDisconnect(onDisconnect);
+
+		window.dispatchEvent(new Event("pagehide"));
+		expect(onDisconnect).toHaveBeenCalledTimes(1);
+		expect(onConnect).not.toHaveBeenCalled();
+
+		window.dispatchEvent(new Event("pageshow"));
+		expect(onConnect).toHaveBeenCalledTimes(1);
+		expect(onDisconnect).toHaveBeenCalledTimes(1);
+
+		t.close();
+	});
+
+	it("T3-BC: pageshow/pagehide no longer fire handlers after close()", () => {
+		const t = new BroadcastChannelTransport("t3bc-lifecycle-closed");
+		const onConnect = vi.fn();
+		const onDisconnect = vi.fn();
+		t.onConnect(onConnect);
+		t.onDisconnect(onDisconnect);
+		t.close();
+
+		window.dispatchEvent(new Event("pagehide"));
+		window.dispatchEvent(new Event("pageshow"));
+		expect(onConnect).not.toHaveBeenCalled();
+		expect(onDisconnect).not.toHaveBeenCalled();
+	});
 });
