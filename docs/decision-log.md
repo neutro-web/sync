@@ -25,7 +25,7 @@
 
 ## Current State
 
-_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 persistence **D0–D7 complete**. Phase 3 Real Transports **T0–T7 CLOSED** — `BroadcastChannelTransport`, `WebSocketTransport`, wire codec, WS relay fixture, full test/bench suite, all against the frozen seam contract (regression-guard diff empty). T3-BC/T6 verify engine-local reconnect only, not peer-pull recovery. G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (peer reconnect recovery) — remains open, deferred to Phase 5, unaffected by the transports gate. D0 cursor-advancement decision logged and implemented. Phase 4 first-consumer: binding model validated against nf's seam (sandbox spike); robust end-to-end integration gated on NF-1 + the delivery-reliability layer (Finding 2 / Phase 5). B3 reconnect explicitly out of the spike scope.
+_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 persistence **D0–D7 complete**. Phase 3 Real Transports **T0–T7 CLOSED** — `BroadcastChannelTransport`, `WebSocketTransport`, wire codec, WS relay fixture, full test/bench suite, all against the frozen seam contract (regression-guard diff empty). T3-BC/T6 verify engine-local reconnect only, not peer-pull recovery. G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (peer reconnect recovery) — remains open, deferred to Phase 5, unaffected by the transports gate. D0 cursor-advancement decision logged and implemented. Phase 4 first-consumer: binding model validated (nf spike); **NF-1 resolved (opId)**. Robust end-to-end integration still gated on the delivery-reliability layer (spike Finding 2 / Phase 5). B3 reconnect out of scope.
 
 ### Status at a glance
 - **Seam contract:** v1.1. T1–T5 ratified; eight seam types defined; §9 consumer map
@@ -98,11 +98,6 @@ _Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional meth
 ### Open gates (surfaced, NOT decided — do not build past)
 - **G3 — LCD-risk proof**: demonstrate the universal seam isn't worse than a purpose-built
   engine per consumer. Addressed by the conformance suite; not blocking early phases.
-- **NF-1 — op idempotency key (Phase 4 API gap)**: `do()` mints op ids internally; a consumer
-  cannot make an op idempotent across redelivery, so `ns` op-dedup can't back consumer-driven
-  retry (proven: redelivered op double-applies). Resolve before a robust first-consumer
-  integration: (a) `WriteOpts.opId?`, (b) document consumer-owned idem key, or (c) fold into
-  Phase 5 delivery-above-transport. See 2026-06-30 nf spike entry + `docs/design/nf-integration-spike.md`.
 - **G2-6d-bis — durable reconnect-replay is structurally inert** (sandbox; deterministic,
   confirmed by execution): `entry.lastCursor` is updated synchronously in the same
   `onBatch` callback that grows the durable log, so it never lags the log at the moment
@@ -122,6 +117,9 @@ _Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional meth
 - **Charter §8 Phase 2 "three strategies" letter gap** — RESOLVED 2026-06-30: LWW +
   vector-clock + `CRDTPositionStrategy` (scope-bounded, see Phase B / B1 entry) are all
   landed; the literal exit condition is now met.
+- **NF-1 — op idempotency key** — RESOLVED 2026-06-30 (option a): `WriteOpts.opId?` on `do()`;
+  consumer-supplied stable op id makes redelivery dedup-safe. Additive, seam-frozen, back-compat.
+  See 2026-06-30 NF-1 entry + `docs/gates/nf1-opid-gate.md`.
 
 ---
 
@@ -1062,3 +1060,35 @@ delivery reliability to the consumer — a purpose-built form-sync engine would 
 **Artifacts:** `docs/design/nf-integration-spike.md` (reusable analysis + replay: seeded script,
 recorded output, seed sweep). Spike code discarded from sandbox per artifact discipline; the design
 doc + this entry are the durable record.
+
+---
+
+### 2026-06-30 — NF-1 resolved: consumer-supplied op id (`WriteOpts.opId`) — option (a) [LOCKED]
+
+**Gate:** NF-1 (`docs/gates/nf1-opid-gate.md`), opened by the nf integration spike (2026-06-30)
+Finding 1. Resolved with **option (a)**: add an optional `opId` to the public write path so a consumer
+can supply a stable op id; `ns`'s existing dedup-by-id then collapses redelivery of the same logical op.
+
+**Change (client-surface only, additive, back-compat):** `WriteOpts.opId?: string`; `do()` uses
+`makeChangeId(opts?.opId ?? <auto-counter>)`. `set()` unchanged (state dedups by version, not id).
+**No seam change** — seam v1.1 frozen; `types.ts`, `engine.ts`, `seam-contract.md` untouched.
+
+**Contract verification (done, not assumed):** `ChangeId` is already a public token; §1 requires `id`
+be globally unique for op dedup but does not constrain who mints it. Consumer-supplied vs client-minted
+is invisible to the engine (dedup on `change.id.value`). **T1 aligned** — a stable op id *strengthens*
+dedup-by-id (redelivery collapses); the auto-counter *defeated* it. **§7 untouched** — client-surface
+only; `send` still hand-off; retry stays above the transport (Phase 5). This lets a consumer *build*
+delivery reliability; it does not build it.
+
+**Verified by running:** patched `do()` typechecks; with a stable `opId`, two identical `do()` calls
+dedup to one application; without `opId`, two calls apply twice (prior behavior preserved). The
+uniqueness burden moves to the consumer when `opId` is supplied — two *distinct* ops sharing an `opId`
+drop the second. That is a documented, tested consequence (gate NF1-3), not a silent trap.
+
+**Resolves:** the nf spike's Finding 1. The `__idem`-in-op-value workaround the spike used is now
+unnecessary — the API backs consumer-driven op idempotency directly. Finding 2 (no delivery reliability;
+consumer must re-drive) is **unchanged** — still §7 / Phase 5; `opId` makes the op re-drive *correct*,
+it does not add retry.
+
+**Out of scope:** delivery reliability layer (retry/backpressure/ack) — Phase 5. `opId` is the
+primitive that makes Phase 5 op-retry dedup-safe; the retry loop itself is not built here.

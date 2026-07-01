@@ -40,6 +40,9 @@ export interface SyncConfig {
 export interface WriteOpts {
 	lifetime?: Lifetime;
 	unitKey?: string;
+	/** Stable op id for dedup across redelivery (op/`do` only). Consumer owns
+	 *  uniqueness-per-logical-op. Absent → auto-minted (current behavior). */
+	opId?: string;
 }
 
 export interface ScopeHandle {
@@ -290,7 +293,9 @@ export function createSync(config: SyncConfig): SyncClient {
 						scope: scopeObj,
 						changes: [
 							{
-								id: makeChangeId(`${_clientId}:${key}:do:${unit}:${++_seq}`),
+								id: makeChangeId(
+									opts?.opId ?? `${_clientId}:${key}:do:${unit}:${++_seq}`,
+								),
 								kind: "op",
 								scope: scopeObj,
 								unit: makeConflictUnit(unitKey),
