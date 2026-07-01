@@ -9,6 +9,7 @@
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "test:watch": "vitest",
     "bench": "vitest bench --config vitest.browser.config.ts",
+    "bench:node": "vitest bench --config vitest.config.ts",
     "lint": "biome check src test",
     "test:e2e": "playwright test"
   },

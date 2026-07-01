@@ -25,7 +25,7 @@
 
 ## Current State
 
-_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 persistence **D0–D6 complete; D7 numbers pending a CC/CI browser bench run**. G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (not closed). D0 cursor-advancement decision logged and implemented.
+_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 persistence **D0–D6 complete; D7 numbers pending a CC/CI browser bench run**. Phase 3 transports **T7 transport baseline numbers captured** (BroadcastChannel via `pnpm bench`, WebSocket via new `pnpm bench:node`). G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (not closed). D0 cursor-advancement decision logged and implemented.
 
 ### Status at a glance
 - **Seam contract:** v1.1. T1–T5 ratified; eight seam types defined; §9 consumer map
@@ -819,3 +819,65 @@ and the gate's engine-local-recovery scope). Options for Phase 5: (a) persist `o
 (b) document redelivery-dependency as the guarantee. Depends on the Phase 5
 delivery-above-transport seam (a conflict only re-arrives if the peer re-sends — same §7
 territory as peer-recovery). Not blocking Phase 3 persistence closure.
+
+---
+
+## 2026-06-30 — T7: Transport baseline numbers (Phase 3)
+
+**Benchmark suites created:**
+- `bench/transport.bench.ts` — BroadcastChannel, runs via `pnpm bench` (browser workspace,
+  Playwright/Chromium, `vitest.browser.config.ts`).
+- `bench/websocket.bench.ts` — WebSocket, runs via new `pnpm bench:node` script (Node
+  workspace, real `ws` relay process, `vitest.config.ts`). `vitest.config.ts` previously had no
+  `benchmark` block; added one scoped to `bench/websocket.bench.ts` only, so node and browser
+  bench suites don't cross-pollinate (`vitest.browser.config.ts`'s `benchmark.include` was
+  narrowed from `bench/**/*.bench.ts` to the two browser-safe files explicitly, since the
+  WebSocket bench imports Node's `ws` package and cannot run in a browser context).
+
+**Numbers captured (2026-06-30, this machine, CC/CI-equivalent local run —
+`pnpm bench` = Playwright/Chromium, `pnpm bench:node` = Node/real relay process):**
+
+`pnpm bench:node` (WebSocket, real `ws` relay on localhost, cross-process):
+```
+✓ bench/websocket.bench.ts > T7 — WebSocket baseline (CC/CI only) 1673ms
+    name                                                                         hz      min      max     mean      p75      p99     p995     p999     rme  samples
+  · send→receive latency — 1-change batch over real relay (N=1 round-trip)  18.4654  52.8560  55.6623  54.1555  55.2755  55.6623  55.6623  55.6623  ±1.40%       10
+  · batch throughput — 100 sequential 1-change batches over real relay      16.4635  58.9980  64.8431  60.7404  61.4662  64.8431  64.8431  64.8431  ±2.37%        9
+```
+
+`pnpm bench` (BroadcastChannel, Playwright/Chromium, part of the same browser bench run that
+also re-confirms D7's `bench/persistence.bench.ts`):
+```
+✓ |chromium| bench/transport.bench.ts > T7 — BroadcastChannel baseline (CC/CI only) 602ms
+    name                                                       hz     min     max    mean     p75     p99    p995    p999     rme  samples
+  · cross-tab round-trip latency — 1-change batch (N=1)  9,174.00  0.0000  5.5000  0.1090  0.1000  0.2000  0.3000  1.6000  ±3.41%     4587
+```
+
+**Measurement semantics:**
+- WebSocket "send→receive latency" — time from `transport.send()` hand-off to the peer's
+  `receive()` callback firing, over a real `ws` relay process on localhost. Denominator: per
+  single `ChangeBatch` containing exactly 1 `Change`. Includes one full round-trip through the
+  relay (not just send hand-off) — this is a cross-process/network number, distinct from the
+  in-process send-only timing in `websocket-transport.test.ts`.
+- WebSocket "batch throughput" — 100 sequential 1-change batches, denominator = batches/sec,
+  `hz` column above is the bench-loop iteration rate (5 configured iterations per the `{
+  iterations: 5 }` bench option), i.e. each "op" is one full 100-batch drain cycle.
+- BroadcastChannel "cross-tab round-trip latency" — same-context (not literally cross-tab, but
+  same real-browser IPC boundary `BroadcastChannel` always crosses) round trip from
+  `transport.send()` on channel A to channel B's `receive()` firing. Denominator: per single
+  `ChangeBatch` containing exactly 1 `Change`.
+
+Both numbers were captured from real transport implementations exercising real carriers
+(a real `ws` WebSocket server process for the relay, real browser `BroadcastChannel` IPC in
+Playwright/Chromium) — no sandbox/in-process number is presented as a transport baseline here,
+per the T7 gate requirement.
+
+**Config changes:** Added `benchmark: { include: ["bench/websocket.bench.ts"] }` to
+`vitest.config.ts`; added `"bench:node": "vitest bench --config vitest.config.ts"` to
+`package.json` scripts; narrowed `vitest.browser.config.ts`'s `benchmark.include` from
+`bench/**/*.bench.ts` to `["bench/persistence.bench.ts", "bench/transport.bench.ts"]`.
+
+**Seam impact:** None. No change to `docs/seam-contract.md`, `src/core/types.ts`,
+`test/harness/`, or `src/transports/in-process.ts`.
+
+**Gate impact:** Closes T7 (baseline transport numbers, bench, CC/CI only).
