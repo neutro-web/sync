@@ -1,6 +1,7 @@
 # Acceptance Gate: Phase 3 — Persistence (real hardware)
 
-> **Status**: Implementation complete as of 2026-06-30 HEAD `3bcf36c`. All D0–D7 gate items verified and passing (142 tests: 130 pre-existing + 12 new). D7 baseline numbers pending CC/CI run.
+> **Status**: D0–D6 complete; D7 pending CC/CI bench numbers. HEAD `e0fa01c`.
+> D3 is closed by two complementary artifacts: (1) `test/browser/reload.test.ts` — Engine + `hydrateScope()` recovers full state from real IndexedDB (vitest/Playwright, same JS context, fresh instances); (2) `test/e2e/d3-nav-reload.spec.ts` — IDB data survives a genuine `page.reload()` (JS heap cleared, standalone Playwright). Neither alone closes D3 end-to-end; together they do. A single test that runs the TypeScript Engine post-reload would require a build step or dev server not currently in the project — deferred unless Phase 5 adds one.
 
 > **Gate version**: 0.1 (written before code per AGENTS.md gate discipline).
 > **Stream**: Claude Code / CI — **NOT sandbox.** Every item below depends on real-platform
