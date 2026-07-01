@@ -25,7 +25,7 @@
 
 ## Current State
 
-_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 persistence complete (D0–D7). G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (not closed). D0 cursor-advancement decision logged and implemented; full persistence gate closure follows.
+_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 persistence **D0–D6 complete; D7 numbers pending a CC/CI browser bench run**. G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (not closed). D0 cursor-advancement decision logged and implemented.
 
 ### Status at a glance
 - **Seam contract:** v1.1. T1–T5 ratified; eight seam types defined; §9 consumer map
@@ -33,12 +33,11 @@ _Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional meth
   optional method (2026-06-29). Founding semantics otherwise unchanged.
 - **Governance scaffold:** Complete. Charter, custom instructions, AGENTS.md, decision log,
   implementation-state all in place.
-- **Code:** Phase 3 persistence (D0–D7) complete. G2 Public API complete (2026-06-29).
+- **Code:** Phase 3 persistence **D0–D6 complete; D7 (baseline numbers) open pending CC/CI run**. G2 Public API complete (2026-06-29).
   Phase B: B2 (`_applyOp` concurrent routing via Model C, op storage carries full
   `VersionedChange`) and B1 (`CRDTPositionStrategy` — closes the charter Phase 2 "three
   strategies" letter gap) landed and locked. B3 surfaced a confirmed defect in the client's
-  durable reconnect-replay branch (see Log, 2026-06-30) — NOT closed. **142 tests passing**
-  (130 pre-existing + 12 D0–D7); `tsc --noEmit` clean; lint clean. HEAD `3bcf36c`.
+  durable reconnect-replay branch (see Log, 2026-06-30) — NOT closed. **142 node tests + 11 browser tests (Playwright/IndexedDB, CC/CI-only) passing**; `tsc --noEmit` clean; lint clean. HEAD `85162bc`.
 
 ### Locked (do not drift without an explicit superseding entry)
 - **Standalone** — `ns` has no dependency on any neutro sibling. No `neutro/*` runtime import
@@ -804,3 +803,19 @@ correct seq. Timed regions and what is counted are documented inline in the benc
 **Config changes:** Added `"bench": "vitest bench --config vitest.browser.config.ts"` to
 `package.json` scripts; added `benchmark: { include: ["bench/**/*.bench.ts"] }` to browser test
 config in `vitest.browser.config.ts`.
+
+---
+
+## 2026-06-30 — Finding: open conflicts not persisted across reload [FINDING — Phase 5]
+
+Surfaced during Phase 3 D3 review. `openConflicts` is in-memory; a reload mid-conflict drops the
+remote competing `VersionedChange`. Recovery relies on redelivery re-triggering the `concurrent`
+arm (correct under T1), so convergence is preserved once the change is re-sent — but a `defer`'d
+conflict held for human resolution silently disappears from the reloaded engine until then, which
+is undocumented.
+
+Not fixed in Phase 3 (persistence scope was durable log + cursor + seenIds, per the D0 decision
+and the gate's engine-local-recovery scope). Options for Phase 5: (a) persist `openConflicts`;
+(b) document redelivery-dependency as the guarantee. Depends on the Phase 5
+delivery-above-transport seam (a conflict only re-arrives if the peer re-sends — same §7
+territory as peer-recovery). Not blocking Phase 3 persistence closure.
