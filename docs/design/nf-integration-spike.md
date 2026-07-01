@@ -131,14 +131,9 @@ spike-nf-integration.ts`. Fixed `SEED` → identical output. Seed sweep: change 
 > of fidelity (they're about `ns`'s public surface, which is real here).
 
 ### Embedded spike source
-
-```ts
-// spike-nf-integration.ts — throwaway; embedded here for replay.
-// (full source as run in-session; see §1–§4 for what each row proves)
-```
-*(Full source lives with the spike artifact; paste the 250-line `spike-nf-integration.ts` here when
-filing, or keep alongside this doc. It was discarded from the sandbox per artifact discipline; this
-doc + the log entry are the durable record.)*
+Full runnable source: [`nf-integration.spike.ts`](./nf-integration.spike.ts).
+Replay: copy to an `ns` clone root, `npx tsx nf-integration.spike.ts`. Fixed `SEED` →
+identical output; change `SEED` to sweep.
 
 ---
 
