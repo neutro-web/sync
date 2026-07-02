@@ -25,7 +25,7 @@
 
 ## Current State
 
-_Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 persistence **D0–D7 complete**. Phase 3 Real Transports **T0–T7 CLOSED** — `BroadcastChannelTransport`, `WebSocketTransport`, wire codec, WS relay fixture, full test/bench suite, all against the frozen seam contract (regression-guard diff empty). T3-BC/T6 verify engine-local reconnect only, not peer-pull recovery. G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (peer reconnect recovery) — remains open, deferred to Phase 5, unaffected by the transports gate. D0 cursor-advancement decision logged and implemented. Phase 4 first-consumer: binding model validated (nf spike); **NF-1 resolved (opId)**. Robust end-to-end integration still gated on the delivery-reliability layer (spike Finding 2 / Phase 5). B3 reconnect out of scope.
+_Last updated: 2026-07-01. Seam Contract **v1.1** (`mergeVersions` optional method added)._ Phase 3 persistence **D0–D7 complete**. Phase 3 Real Transports **T0–T7 CLOSED** — `BroadcastChannelTransport`, `WebSocketTransport`, wire codec, WS relay fixture, full test/bench suite, all against the frozen seam contract (regression-guard diff empty). T3-BC/T6 verify engine-local reconnect only, not peer-pull recovery. G2 Public API surface resolved, implemented, automated, and locked. Phase B (sandbox close-out) B1+B2 landed; B3 surfaced a new finding (peer reconnect recovery) — remains open, deferred to Phase 5, unaffected by the transports gate. D0 cursor-advancement decision logged and implemented. Phase 4 first-consumer: binding model validated (nf spike); **NF-1 resolved (opId)**. Robust end-to-end integration still gated on the delivery-reliability layer (spike Finding 2 / Phase 5). B3 reconnect out of scope. Phase 5 delivery-reliability **design pass complete** (architect): layered resolution locked — option (2) sender-side per-peer delivery cursor is the additive primary (closes B3 peer-recovery + nf Finding 2), option (1) full-reconcile is the correctness floor, option (3) version-watermark is a deferred v1.1→v1.2 contract gate. Ack loop = sub-gate D-ACK. Gate: `docs/gates/phase5-delivery.md`. No code landed; CC implements.
 
 ### Status at a glance
 - **Seam contract:** v1.1. T1–T5 ratified; eight seam types defined; §9 consumer map
@@ -107,7 +107,17 @@ _Last updated: 2026-06-30. Seam Contract **v1.1** (`mergeVersions` optional meth
   deciding when `lastCursor` advances (tied to confirmed delivery, not durable accept)
   and/or a pull-based catch-up seam — both are §7 delivery-above-transport territory,
   Phase 5. Not blocking Phase B close; blocks any future claim that reconnect-replay
-  works. See 2026-06-30 Phase B / B3 entry.
+  works. See 2026-06-30 Phase B / B3 entry. Fix path now designed — see 2026-07-01 Phase 5
+  delivery-reliability entry (per-peer delivery cursor replaces the tip-tracking
+  `lastCursor`); closure is a CC deliverable against `docs/gates/phase5-delivery.md`
+  G-D0/G-D1.
+- **Phase 5 delivery reliability — DESIGNED, gate open (CC to implement)**: option (2)
+  sender-side per-peer delivery cursor, additive over v1.1. Failable items in
+  `docs/gates/phase5-delivery.md` (G-D0..G-D7). Sub-gate **D-ACK** (ack message shape) surfaced,
+  not designed. Not closed until verified on main HEAD.
+- **Option (3) version-watermark pull — v1.1→v1.2 contract gate (surfaced, do not open)**:
+  bandwidth-optimal recovery; needs `Feed` pull-by-version + `ClockStrategy` digest op. Open only
+  on a CC/CI-measured bandwidth justification. See 2026-07-01 entries.
 
 ### Superseded / resolved
 - **G1 — Substrate** — RESOLVED 2026-06-24: `ns` is standalone (option a).
@@ -1092,3 +1102,74 @@ it does not add retry.
 
 **Out of scope:** delivery reliability layer (retry/backpressure/ack) — Phase 5. `opId` is the
 primitive that makes Phase 5 op-retry dedup-safe; the retry loop itself is not built here.
+
+---
+
+### 2026-07-01 — Phase 5 delivery-reliability design pass: layered resolution, option (2) primary [DESIGN — gate opened]
+
+**Gate:** Phase 5 delivery reliability (`docs/gates/phase5-delivery.md`). Architect pass @
+HEAD `e17ce81`. Design doc: `docs/design/delivery-reliability.md`. **No code landed** (CC
+implements). Resolves the framing of Q1–Q3 from the Phase 5 continuation brief. **No seam
+change — v1.1 stands.** The primary mechanism is additive over the frozen surface.
+
+**Grounded findings (source + ≥2-replica spikes, discarded per artifact discipline):**
+- **B3 root cause re-confirmed at source:** `create-sync.ts`'s `onBatch` advances the single
+  tip-tracking `lastCursor` inside `apply()` for every accepted durable change (local and
+  remote), so `changes(scope, lastCursor)` on `onConnect` always yields nothing; and the
+  mechanism self-republishes this engine's own log, never pulls a peer's.
+- **Cross-peer cursor is unsound (F3):** `Cursor._seq` is an engine-local ordinal (explicit
+  engine invariant) and `changes()` filters by seq only. Spike: a peer pulling a peer's log
+  with its *own* cursor gets the wrong set (re-sends held, omits missing). Only `since=null`
+  (full re-send) is sound naively — but unbounded.
+- **Peer-pull composes from the existing surface (Q3 additive):** request-as-ordinary-batch
+  (requester `since` in `Change.value`, which is `unknown` to ns) + response via `changes(since)`
+  over `send`/`receive`. No new `Transport`/`Cursor`/wire type. Spike-verified.
+- **Re-drive is load-bearing (Q2):** under 30% drop+reorder+duplicate, re-driven pull converged
+  12/12 seeds; a single un-redriven pull converged 0/12. Matches nf Finding 2 on the recovery path.
+- **Sender-side per-peer cursor is mesh-locality-sound (Q1):** `engine.apply()` re-stamps every
+  emitted `onBatch` with the *receiving* engine's own `cursorSeq` (engine.ts:238), so a relayed
+  batch carries the relayer's cursor, never the origin's. A peer's delivery cursor for peer P
+  indexes its *own* log; it re-drives `changes(since=deliveryCursor[P])` from its own log. 3-peer
+  spike: offline C recovered B's writes through A using only A-local seqs; re-reconnect incremental.
+
+**Decision — layered resolution:**
+1. **Option (2) — sender-side per-peer delivery cursor — is the PRIMARY mechanism, built in CC.**
+   Additive (rides `changes(since)` + batch-exchange; no seam delta). Locality-sound by
+   construction (never interprets a foreign cursor). Closes B3's second half and makes nf op
+   re-delivery correct. A second, per-peer, confirmed-delivery cursor — advances only on ack —
+   kept **distinct** from the durable-accept log cursor (D0 stands, unchanged).
+2. **Option (1) — full reconcile (`since=null` / `snapshot()` exchange) — is the correctness
+   floor**, not the answer: sound + zero-delta but O(full log/state) per reconnect (violates the
+   replay-cost axiom). Role: fallback when no per-peer cursor exists (cold peer / evicted state).
+   (2) degrades to (1), never below.
+3. **Option (3) — version-watermark pull — is DEFERRED behind a contract gate** (separate entry
+   below). Optimal + `Version` is the cross-replica token, but needs a `Feed` pull-by-version
+   primitive AND a `ClockStrategy` digest op (`Version` is opaque to ns) = **v1.1→v1.2** and a
+   slot widening. Buys optimization not correctness, for a bandwidth win unmeasurable in sandbox.
+
+**Q2 ack loop — sub-gate D-ACK, not designed here (scope decision):** the delivery cursor advances
+only on a confirmed ack; the ack is itself a droppable ordinary-batch message needing idempotency
++ re-drive. Its wire shape is deferred to sub-gate D-ACK; this pass locks only that the delivery
+cursor advances on ack (not on `onBatch`) and that ack delivery is unreliable.
+
+**Scope:** delivery reliability only. Open-conflicts-not-persisted, `closedKeys` growth, and the
+conformance/LCD-risk proof are tracked separately, not resolved here.
+
+**Supersedes:** nothing. Extends the 2026-06-30 D0 deferral of confirmed-delivery timing (now
+resolved as a distinct per-peer cursor) and the 2026-06-30 B3 finding (fix path now designed).
+
+### 2026-07-01 — Deferred contract gate: option (3) version-watermark pull is a v1.1→v1.2 delta [GATE — surfaced, not decided]
+
+Named so it is not silently folded into implementation. Option (3) from the delivery-reliability
+design (§6) — a requester sends a per-unit version digest; the responder filters by `compare` —
+is the bandwidth-optimal incremental recovery mechanism and the eventual best end-state, but it is
+**not additive**. It requires:
+- a `Feed` pull-by-version primitive (new method or `changes()` overload — `changes()` filters by
+  seq only today), AND
+- an optional compact digest / `sinceVersion` op on `ClockStrategy` (required because `Version` is
+  opaque to ns; ns cannot build the watermark itself) — which widens a slot and must stay narrow.
+
+Both change what ns promises about delivery/replay → **contract-level, seam v1.1 → v1.2**. Per
+escalation calibration, surfaced as its own decision. **Do not open** until a CC/CI-measured
+bandwidth number shows option (2)'s re-send cost is a real bottleneck for a real consumer (sandbox
+perf is noise). Until then, option (2) is the resting state.
